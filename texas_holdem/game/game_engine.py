@@ -11,7 +11,8 @@ from ..core.table import Table
 from ..core.evaluator import PokerEvaluator
 from .game_state import GameStateManager
 from .betting import BettingRound
-from ..utils.constants import GameState, SMALL_BLIND, BIG_BLIND
+from ..utils.constants import GameState
+from ..utils import constants as _constants
 
 class GameEngine:
     def __init__(self, player_names: List[str], initial_chips: int = 1000):
@@ -45,23 +46,23 @@ class GameEngine:
         # 发布小盲注和大盲注（筹码不足时自动全押）
         for player in self.players:
             if player.is_small_blind:
-                if player.chips <= SMALL_BLIND:
+                if player.chips <= _constants.SMALL_BLIND:
                     player.all_in()
                 else:
-                    player.place_bet(SMALL_BLIND)
+                    player.place_bet(_constants.SMALL_BLIND)
             elif player.is_big_blind:
-                if player.chips <= BIG_BLIND:
+                if player.chips <= _constants.BIG_BLIND:
                     player.all_in()
                 else:
-                    player.place_bet(BIG_BLIND)
+                    player.place_bet(_constants.BIG_BLIND)
 
         # 设置初始下注状态
-        self.game_state.current_bet = BIG_BLIND
-        self.game_state.min_raise = BIG_BLIND - SMALL_BLIND  # 最小加注为大盲注减去小盲注
+        self.game_state.current_bet = _constants.BIG_BLIND
+        self.game_state.min_raise = _constants.BIG_BLIND - _constants.SMALL_BLIND  # 最小加注为大盲注减去小盲注
 
         print(f"\n=== 开始第 {self.game_state.hand_number} 手牌 ===")
         print(f"庄家: {[p.name for p in self.players if p.is_dealer][0]}")
-        print(f"小盲注: {SMALL_BLIND}, 大盲注: {BIG_BLIND}")
+        print(f"小盲注: {_constants.SMALL_BLIND}, 大盲注: {_constants.BIG_BLIND}")
 
     def deal_flop(self):
         """发翻牌（3张公共牌）"""

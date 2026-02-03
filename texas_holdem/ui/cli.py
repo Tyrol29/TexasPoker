@@ -507,54 +507,62 @@ class CLI:
 
             # 翻牌前下注
             if not self._run_betting_round_interactive():
-                # 检查是否只剩一个玩家
+                # 检查是否只剩一个玩家有筹码
                 active_players = [p for p in game_state.players if p.chips > 0]
                 if len(active_players) < 2:
                     break
-                # 修复：移除continue，让代码继续执行到循环末尾的处理逻辑
-                # 继续执行淘汰检查和统计报告
-
-            # 发翻牌
-            self.game_engine.deal_flop()
-            game_state.advance_stage()
-            self.current_stage_name = "翻牌圈"
-            self.display_table(game_state)
-
-            # 翻牌圈下注
-            if not self._run_betting_round_interactive():
-                active_players = [p for p in game_state.players if p.chips > 0]
-                if len(active_players) < 2:
-                    break
-                # 一手牌结束，继续淘汰检查和统计报告
-
-            # 发转牌
-            self.game_engine.deal_turn()
-            game_state.advance_stage()
-            self.current_stage_name = "转牌圈"
-            self.display_table(game_state)
-
-            # 转牌圈下注
-            if not self._run_betting_round_interactive():
-                active_players = [p for p in game_state.players if p.chips > 0]
-                if len(active_players) < 2:
-                    break
-                # 一手牌结束，继续淘汰检查和统计报告
-
-            # 发河牌
-            self.game_engine.deal_river()
-            game_state.advance_stage()
-            self.current_stage_name = "河牌圈"
-            self.display_table(game_state)
-
-            # 河牌圈下注
-            if not self._run_betting_round_interactive():
-                active_players = [p for p in game_state.players if p.chips > 0]
-                if len(active_players) < 2:
-                    break
-                # 一手牌结束，继续淘汰检查和统计报告
+                # 一手牌结束（有人赢得底池），跳到淘汰检查
+                # 使用continue跳过剩余阶段，直接进入下一轮
+                # 注意：不能直接用continue，需要执行淘汰检查
+                # 通过设置标记来跳过剩余阶段
+                hand_finished = True
             else:
-                # 摊牌
-                self._run_showdown()
+                hand_finished = False
+            
+            if not hand_finished:
+                # 发翻牌
+                self.game_engine.deal_flop()
+                game_state.advance_stage()
+                self.current_stage_name = "翻牌圈"
+                self.display_table(game_state)
+
+                # 翻牌圈下注
+                if not self._run_betting_round_interactive():
+                    active_players = [p for p in game_state.players if p.chips > 0]
+                    if len(active_players) < 2:
+                        break
+                    hand_finished = True
+            
+            if not hand_finished:
+                # 发转牌
+                self.game_engine.deal_turn()
+                game_state.advance_stage()
+                self.current_stage_name = "转牌圈"
+                self.display_table(game_state)
+
+                # 转牌圈下注
+                if not self._run_betting_round_interactive():
+                    active_players = [p for p in game_state.players if p.chips > 0]
+                    if len(active_players) < 2:
+                        break
+                    hand_finished = True
+            
+            if not hand_finished:
+                # 发河牌
+                self.game_engine.deal_river()
+                game_state.advance_stage()
+                self.current_stage_name = "河牌圈"
+                self.display_table(game_state)
+
+                # 河牌圈下注
+                if not self._run_betting_round_interactive():
+                    active_players = [p for p in game_state.players if p.chips > 0]
+                    if len(active_players) < 2:
+                        break
+                    # 一手牌结束
+                else:
+                    # 摊牌
+                    self._run_showdown()
             
             # 检查并淘汰筹码归零的电脑玩家
             eliminated = self._eliminate_broke_players()
@@ -1056,11 +1064,16 @@ class CLI:
             # 获取预设风格和实际风格
             preset_style = self.player_styles.get(name, '-')
             preset_short = style_names.get(preset_style, preset_style)
-            actual_style = self._classify_player_style(vpip_pct, pfr_pct, af)
-            actual_short = style_names.get(actual_style, actual_style)
+            actual_style_full = self._classify_player_style(vpip_pct, pfr_pct, af)
+            # 提取风格代码（如"TAG(紧凶)" -> "TAG"）
+            actual_style_code = actual_style_full.split('(')[0] if '(' in actual_style_full else actual_style_full
+            actual_short = style_names.get(actual_style_code, actual_style_code)
+            
+            # 分析偏离详情
+            deviation_analysis = self._analyze_style_deviation(preset_style, vpip_pct, pfr_pct, af)
             
             # 判断是否符合预设
-            if preset_style == '-' or preset_style == actual_style:
+            if preset_style == '-' or preset_style == actual_style_code:
                 diff = "符合" if preset_style != '-' else "人类"
             else:
                 diff = "偏离"
@@ -1069,7 +1082,11 @@ class CLI:
             
             # === 基础指标行 ===
             print(f"\n{display_name:<15} | VPIP:{vpip_pct:5.1f}% | PFR:{pfr_pct:5.1f}% | 3BET:{three_bet_pct:4.1f}% | "
-                  f"AF:{af:4.2f} | 预设:{preset_short:<6} | 实际:{actual_short:<6} [{diff}]")
+                  f"AF:{af:4.2f} | 预设:{preset_short:<6} | 实际:{actual_style_full:<10} [{diff}]")
+            
+            # 显示偏离分析
+            if deviation_analysis:
+                print(f"  [偏离分析] {deviation_analysis}")
             
             # === 高级指标行1 ===
             # WTSD% (摊牌率)
@@ -1166,16 +1183,17 @@ class CLI:
 
     def _increase_blinds(self):
         """增加盲注（翻倍）- 锦标赛模式"""
-        from texas_holdem.utils.constants import SMALL_BLIND, BIG_BLIND
+        import texas_holdem.utils.constants as constants
+        
+        # 获取当前盲注值
+        old_sb = constants.SMALL_BLIND
+        old_bb = constants.BIG_BLIND
         
         # 盲注翻倍
-        old_sb = SMALL_BLIND
-        old_bb = BIG_BLIND
         new_sb = old_sb * 2
         new_bb = old_bb * 2
         
-        # 更新常量（通过修改模块属性）
-        import texas_holdem.utils.constants as constants
+        # 更新模块级别的常量
         constants.SMALL_BLIND = new_sb
         constants.BIG_BLIND = new_bb
         
@@ -1209,6 +1227,55 @@ class CLI:
             return "LAG(松凶)"
         else:
             return "LP(松弱)"
+    
+    def _analyze_style_deviation(self, preset_style, vpip, pfr, af):
+        """
+        分析玩家打法偏离预设风格的具体细节
+        
+        Returns:
+            偏离描述字符串，如果没有偏离则返回空字符串
+        """
+        if preset_style == '-' or not preset_style:
+            return ""
+        
+        deviations = []
+        
+        # 定义各风格的目标范围
+        style_targets = {
+            'TAG': {'vpip': (15, 25), 'af': (2.0, 4.0)},      # 紧凶
+            'LAG': {'vpip': (30, 45), 'af': (2.0, 4.0)},      # 松凶
+            'LAP': {'vpip': (15, 25), 'af': (0.5, 1.5)},      # 紧弱
+            'LP':  {'vpip': (35, 50), 'af': (0.5, 1.5)},      # 松弱
+        }
+        
+        if preset_style not in style_targets:
+            return ""
+        
+        targets = style_targets[preset_style]
+        
+        # 分析松紧度 (VPIP)
+        if vpip < targets['vpip'][0]:
+            deviations.append(f"偏紧(VPIP{vpip:.1f}% < 目标{targets['vpip'][0]}%)")
+        elif vpip > targets['vpip'][1]:
+            deviations.append(f"偏松(VPIP{vpip:.1f}% > 目标{targets['vpip'][1]}%)")
+        
+        # 分析凶弱度 (AF)
+        if af < targets['af'][0]:
+            deviations.append(f"偏弱(AF{af:.2f} < 目标{targets['af'][0]})")
+        elif af > targets['af'][1]:
+            deviations.append(f"偏凶(AF{af:.2f} > 目标{targets['af'][1]})")
+        
+        # 分析PFR/VPIP比例（攻击倾向）
+        if vpip > 0:
+            pfr_vpip_ratio = pfr / vpip
+            if pfr_vpip_ratio < 0.4:
+                deviations.append(f"跟注过多(PFR/VPIP{pfr_vpip_ratio:.2f}偏低)")
+            elif pfr_vpip_ratio > 0.8:
+                deviations.append(f"加注过多(PFR/VPIP{pfr_vpip_ratio:.2f}偏高)")
+        
+        if deviations:
+            return "; ".join(deviations)
+        return ""
 
     def run_auto_game(self, hands: int = 5):
         """运行自动游戏（用于测试）"""
@@ -1893,15 +1960,13 @@ class CLI:
             #       99=0.71, 88=0.70, AKs=0.66, AQs=0.64, AKo=0.62
             #       AJo=0.58, KQs=0.58 - 这是紧风格的底线
             if hand_strength < 0.58:
-                # 弱牌：直接弃牌（紧风格很少玩弱牌，即使是大盲注）
+                # 弱牌：通常弃牌
                 if player.is_big_blind and amount_to_call <= 10:
-                    # 大盲注位置，没人加注，可以免费看牌时偶尔玩
-                    if random.random() < 0.3:  # 只玩30%的大盲注弱牌
-                        return 'call', 0
-                    else:
-                        return 'fold', 0
+                    # 大盲注位置，没人加注，可以免费看牌时：应该看牌，不弃牌！
+                    # 已经投入大盲注，弃牌就是白白损失
+                    return 'call', 0  # call 0 = check，免费看牌
                 else:
-                    # 其他位置或直接弃牌
+                    # 其他位置需要跟注才能继续，直接弃牌
                     return 'fold', 0
             # 强牌（>=0.58）继续后续逻辑决定如何打
         
@@ -1909,8 +1974,8 @@ class CLI:
             # 松风格：玩前40-45%的牌（手牌强度 >= 0.35）
             if hand_strength < 0.35:
                 if player.is_big_blind and amount_to_call <= 10:
-                    if random.random() < 0.5:  # 50%玩大盲注弱牌
-                        return 'call', 0
+                    # 大盲注可以免费看牌时，总是看牌不弃牌
+                    return 'call', 0
                 if random.random() < 0.75:  # 75%弃牌其他弱牌
                     return 'fold', 0
                 else:
@@ -1943,7 +2008,12 @@ class CLI:
                 action_weights['raise'] = 0.55
                 action_weights['bet'] = 0.30
                 action_weights['call'] = 0.15
-            else:  # 弱的风格
+            elif style == 'LAP':  # 紧弱 - 强牌也控制激进
+                action_weights['raise'] = 0.15  # 很少加注
+                action_weights['bet'] = 0.25    # 适度下注
+                action_weights['call'] = 0.50   # 主要跟注
+                action_weights['check'] = 0.10
+            else:  # LP - 松弱
                 action_weights['raise'] = 0.30
                 action_weights['bet'] = 0.40
                 action_weights['call'] = 0.30
@@ -1952,7 +2022,12 @@ class CLI:
                 action_weights['raise'] = 0.40
                 action_weights['bet'] = 0.35
                 action_weights['call'] = 0.25
-            else:  # 弱的风格
+            elif style == 'LAP':  # 紧弱 - 强牌也控制
+                action_weights['raise'] = 0.10  # 很少加注
+                action_weights['bet'] = 0.20    # 适度下注
+                action_weights['call'] = 0.60   # 主要跟注
+                action_weights['fold'] = 0.10
+            else:  # LP - 松弱
                 action_weights['raise'] = 0.15
                 action_weights['bet'] = 0.30
                 action_weights['call'] = 0.55
@@ -1967,11 +2042,11 @@ class CLI:
                 action_weights['bet'] = 0.30
                 action_weights['call'] = 0.35
                 action_weights['fold'] = 0.10
-            elif style == 'LAP':  # 紧弱 - 谨慎跟注
-                action_weights['call'] = 0.60
-                action_weights['fold'] = 0.25
-                action_weights['bet'] = 0.10
-                action_weights['raise'] = 0.05
+            elif style == 'LAP':  # 紧弱 - 非常被动，很少加注
+                action_weights['call'] = 0.70  # 主要跟注
+                action_weights['fold'] = 0.20
+                action_weights['bet'] = 0.05   # 极少主动下注
+                action_weights['raise'] = 0.05  # 极少加注
             else:  # LP - 松弱 - 被动跟注
                 action_weights['call'] = 0.65
                 action_weights['fold'] = 0.15
@@ -2143,14 +2218,15 @@ class CLI:
         if amount_to_call > 0:
             call_ratio = amount_to_call / max(player.chips, 1)
             if call_ratio > 0.5:  # 需要跟注超过筹码一半
-                # 但如果有check选项，优先check
+                # 如果有check选项（免费看牌），绝不增加弃牌权重
                 if 'check' not in available_actions:
                     action_weights['fold'] = min(1.0, action_weights['fold'] + 0.4)
-                action_weights['call'] = max(0, action_weights['call'] - 0.3)
+                    action_weights['call'] = max(0, action_weights['call'] - 0.3)
+                # 如果可以check，保持现有权重，让后续逻辑决定
             elif call_ratio > 0.3:  # 需要跟注超过30%
                 if 'check' not in available_actions:
                     action_weights['fold'] = min(1.0, action_weights['fold'] + 0.2)
-                action_weights['call'] = max(0, action_weights['call'] - 0.1)
+                    action_weights['call'] = max(0, action_weights['call'] - 0.1)
 
         # 11. 过滤不可用行动
         for action in list(action_weights.keys()):
@@ -2198,8 +2274,10 @@ class CLI:
         # 13. 归一化权重
         total_weight = sum(action_weights.values())
         if total_weight == 0:
-            # 默认：跟注或弃牌
-            if 'call' in available_actions:
+            # 默认：优先过牌，其次跟注，最后弃牌
+            if 'check' in available_actions:
+                return 'check', 0  # 没人下注时，免费看牌
+            elif 'call' in available_actions:
                 return 'call', 0
             else:
                 return 'fold', 0
@@ -2223,8 +2301,10 @@ class CLI:
                         return 'check', 0
                 return action, amount
 
-        # 15. 回退：跟注或弃牌
-        if 'call' in available_actions:
+        # 15. 回退：优先过牌，其次跟注，最后弃牌
+        if 'check' in available_actions:
+            return 'check', 0  # 没人下注时，绝不弃牌
+        elif 'call' in available_actions:
             return 'call', 0
         else:
             return 'fold', 0
@@ -2253,17 +2333,20 @@ class CLI:
             return 0
 
         import random
-        from texas_holdem.utils.constants import BIG_BLIND
+        from texas_holdem.utils import constants as _game_constants
 
         # 翻牌前特殊处理：限制加注在3-5个大盲
         is_preflop = (game_state == 'pre_flop' or 
                       (isinstance(game_state, str) and 'pre' in game_state.lower()))
         
+        # 获取当前大盲注值（支持盲注升级）
+        BIG_BLIND_VALUE = _game_constants.BIG_BLIND
+        
         if is_preflop:
             # 翻牌前：降低加注频率，更保守的加注大小
             if action == 'raise':
                 # 前面有人加注过吗？
-                has_raise_before = current_bet > BIG_BLIND * 2
+                has_raise_before = current_bet > BIG_BLIND_VALUE * 2
                 
                 # 如果有人已经加注过，降低再加注的概率（通过返回较小的加注额）
                 if has_raise_before and hand_strength < 0.6:
@@ -2272,12 +2355,12 @@ class CLI:
                         return 0  # 返回0表示最小加注，但后续会被过滤为call
                 
                 # 基础加注额：2-3BB（降低）
-                base_min_raise = BIG_BLIND * 2
-                max_raise_add = BIG_BLIND * 3
+                base_min_raise = BIG_BLIND_VALUE * 2
+                max_raise_add = BIG_BLIND_VALUE * 3
                 
                 # 只有强牌才加注更多
                 if hand_strength > 0.75:
-                    max_raise_add = BIG_BLIND * 4
+                    max_raise_add = BIG_BLIND_VALUE * 4
                 
                 # 如果前面有人加注过，使用min_raise
                 actual_min_raise = base_min_raise
@@ -2286,16 +2369,16 @@ class CLI:
                 
                 # 确保最小不超过最大
                 if actual_min_raise > max_raise_add:
-                    max_raise_add = actual_min_raise + BIG_BLIND
+                    max_raise_add = actual_min_raise + BIG_BLIND_VALUE
                 
                 # 随机选择加注大小
                 raise_amount = random.randint(actual_min_raise, max_raise_add)
-                raise_amount = max(BIG_BLIND, min(raise_amount, player.chips - amount_to_call))
+                raise_amount = max(BIG_BLIND_VALUE, min(raise_amount, player.chips - amount_to_call))
                 
                 return raise_amount
             else:  # bet
                 # 翻牌前bet：2.5-3.5个大盲（降低）
-                amount = random.randint(int(BIG_BLIND * 2.5), int(BIG_BLIND * 3.5))
+                amount = random.randint(int(BIG_BLIND_VALUE * 2.5), int(BIG_BLIND_VALUE * 3.5))
                 return max(20, min(amount, player.chips))
 
         # 翻牌后：基于底池大小的下注
