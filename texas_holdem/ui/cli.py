@@ -481,7 +481,7 @@ class CLI:
 
     def run_interactive_game(self):
         """运行交互式游戏 - 支持2-8人"""
-        self.display_welcome()
+        # 注意：display_welcome 已在 main_menu 中调用
         self.player_names = self.get_player_names()
 
         # 创建游戏引擎
@@ -1356,6 +1356,9 @@ class CLI:
 
     def main_menu(self):
         """显示主菜单"""
+        # 首次启动显示欢迎信息
+        self.display_welcome()
+        
         while True:
             print("\n" + "=" * 60)
             print("德州扑克主菜单")
