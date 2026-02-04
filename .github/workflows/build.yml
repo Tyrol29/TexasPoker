@@ -1,0 +1,106 @@
+name: Build Executables
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller
+        pip install -r requirements.txt
+    
+    - name: Build Windows executable
+      run: python build_exe.py
+    
+    - name: Upload Windows artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: texas-holdem-windows
+        path: dist/德州扑克.exe
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller
+        pip install -r requirements.txt
+    
+    - name: Build Linux executable
+      run: |
+        pyinstaller --onefile --console \
+          --hidden-import texas_holdem.core.card \
+          --hidden-import texas_holdem.core.deck \
+          --hidden-import texas_holdem.core.hand \
+          --hidden-import texas_holdem.core.player \
+          --hidden-import texas_holdem.core.table \
+          --hidden-import texas_holdem.core.evaluator \
+          --hidden-import texas_holdem.game.game_state \
+          --hidden-import texas_holdem.game.betting \
+          --hidden-import texas_holdem.game.game_engine \
+          --hidden-import texas_holdem.ui.cli \
+          --hidden-import texas_holdem.utils.constants \
+          --hidden-import texas_holdem.network \
+          --name texas-holdem-linux \
+          texas_holdem/main.py
+    
+    - name: Upload Linux artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: texas-holdem-linux
+        path: dist/texas-holdem-linux
+
+  release:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Download Windows artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: texas-holdem-windows
+        path: ./release
+    
+    - name: Download Linux artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: texas-holdem-linux
+        path: ./release
+    
+    - name: Rename files
+      run: |
+        mv ./release/德州扑克.exe ./release/texas-holdem-windows.exe
+        chmod +x ./release/texas-holdem-linux
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: |
+          ./release/texas-holdem-windows.exe
+          ./release/texas-holdem-linux
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
