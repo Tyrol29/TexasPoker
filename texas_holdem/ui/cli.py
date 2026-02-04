@@ -16,7 +16,9 @@ from texas_holdem.game.game_engine import GameEngine
 from texas_holdem.game.betting import BettingRound
 from texas_holdem.utils.constants import Action, GameState, SMALL_BLIND, BIG_BLIND, INITIAL_CHIPS
 from texas_holdem.utils.save_manager import SaveManager, GameStateEncoder, GameStateDecoder
+from texas_holdem.network import HostServer, GameClient, MessageType, GameMessage
 import os
+import threading
 
 class CLI:
     """命令行界面类"""
@@ -44,6 +46,17 @@ class CLI:
         self.initial_ai_count = 0      # 初始电脑数量
         self.blind_level = 1           # 盲注级别
         self.blind_doubled = False     # 是否已翻倍
+        
+        # 联机模式相关
+        self.game_mode = "single"      # single/host/client
+        self.server = None             # 房主服务端
+        self.client = None             # 客户端连接
+        self.my_player_name = ""       # 当前玩家名称
+        self.remote_players = []       # 远程玩家列表
+        self.is_waiting_for_remote = False  # 是否正在等待远程玩家操作
+        self.remote_action_received = None  # 接收到的远程玩家操作
+        self.turn_countdown = 15       # 回合倒计时秒数
+        self.countdown_active = False  # 倒计时是否进行中
         
         # 打法风格参数配置
         self.style_configs = {
@@ -1422,17 +1435,19 @@ class CLI:
             print("\n" + "=" * 60)
             print("德州扑克主菜单")
             print("=" * 60)
-            print("1. 开始新游戏 (交互模式)")
+            print("1. 开始新游戏 (单机模式)")
             if has_saves:
                 print("2. 继续游戏 (加载存档)")
             else:
                 print("2. 继续游戏 (无存档)")
-            print("3. 运行测试游戏 (自动模式)")
-            print("4. 游戏规则说明")
-            print("5. 退出")
+            print("3. 创建房间 (联机对战)")
+            print("4. 加入房间 (联机对战)")
+            print("5. 运行测试游戏 (自动模式)")
+            print("6. 游戏规则说明")
+            print("7. 退出")
             print("=" * 60)
 
-            choice = input("请选择 (1-5): ").strip()
+            choice = input("请选择 (1-7): ").strip()
 
             if choice == '1':
                 self.run_interactive_game()
@@ -1442,18 +1457,211 @@ class CLI:
                 else:
                     print("\n暂无存档，请先开始新游戏!")
             elif choice == '3':
+                self.create_room_menu()
+            elif choice == '4':
+                self.join_room_menu()
+            elif choice == '5':
                 try:
                     hands = int(input("运行几手牌? (默认 5): ").strip() or "5")
                     self.run_auto_game(hands)
                 except ValueError:
                     print("请输入有效数字")
-            elif choice == '4':
+            elif choice == '6':
                 self.display_rules()
-            elif choice == '5':
+            elif choice == '7':
                 print("谢谢游玩!")
                 break
             else:
                 print("无效选择，请重试")
+
+    def create_room_menu(self):
+        """创建房间（房主）菜单"""
+        print("\n" + "=" * 60)
+        print("创建房间 - 联机对战")
+        print("=" * 60)
+        
+        # 输入房主名称
+        while True:
+            host_name = input("请输入您的名称: ").strip()
+            if host_name:
+                break
+            print("名称不能为空")
+        
+        self.my_player_name = host_name
+        self.game_mode = "host"
+        
+        # 选择AI数量
+        print("\n房间设置:")
+        while True:
+            try:
+                ai_count = input("AI玩家数量 (0-7, 默认3): ").strip()
+                if not ai_count:
+                    ai_count = 3
+                else:
+                    ai_count = int(ai_count)
+                if 0 <= ai_count <= 7:
+                    break
+                print("请输入0-7之间的数字")
+            except ValueError:
+                print("请输入有效数字")
+        
+        # 启动服务器
+        print("\n启动服务器...")
+        self.server = HostServer("0.0.0.0", 8888)
+        self.server.on_player_join = self._on_remote_player_join
+        self.server.on_player_leave = self._on_remote_player_leave
+        self.server.on_action_received = self._on_remote_action_received
+        
+        if not self.server.start():
+            print("启动服务器失败!")
+            self.game_mode = "single"
+            return
+        
+        # 获取本机IP
+        import socket
+        hostname = socket.gethostname()
+        try:
+            local_ip = socket.getaddrinfo(hostname, None, socket.AF_INET)[0][4][0]
+        except:
+            local_ip = "127.0.0.1"
+        
+        print(f"\n{'='*60}")
+        print("房间已创建!")
+        print(f"{'='*60}")
+        print(f"房间地址: {local_ip}:8888")
+        print(f"房主: {host_name}")
+        print(f"\n等待其他玩家加入...")
+        print("输入 'start' 开始游戏，输入 'exit' 取消")
+        print(f"{'='*60}")
+        
+        # 等待开始
+        remote_players = []
+        while True:
+            try:
+                cmd = input("> ").strip().lower()
+                if cmd == 'start':
+                    if len(remote_players) + 1 < 2:  # 房主+至少1人
+                        print("至少需要2人才能开始游戏!")
+                        continue
+                    break
+                elif cmd == 'exit':
+                    self.server.stop()
+                    self.server = None
+                    self.game_mode = "single"
+                    return
+                elif cmd == 'list':
+                    print(f"\n当前玩家 ({len(remote_players) + 1}人):")
+                    print(f"  [房主] {host_name}")
+                    for name in remote_players:
+                        print(f"  [玩家] {name}")
+            except KeyboardInterrupt:
+                self.server.stop()
+                self.server = None
+                self.game_mode = "single"
+                return
+        
+        # 开始游戏
+        self.server.start_game()
+        self.player_names = [host_name] + remote_players
+        for i in range(ai_count):
+            self.player_names.append(f"电脑{i+1}号")
+        
+        print(f"\n游戏开始! 共 {len(self.player_names)} 人")
+        self._run_host_game()
+
+    def join_room_menu(self):
+        """加入房间菜单"""
+        print("\n" + "=" * 60)
+        print("加入房间 - 联机对战")
+        print("=" * 60)
+        
+        # 输入名称
+        while True:
+            player_name = input("请输入您的名称: ").strip()
+            if player_name:
+                break
+            print("名称不能为空")
+        
+        # 输入房间地址
+        host_ip = input("输入房间IP地址 (默认127.0.0.1): ").strip()
+        if not host_ip:
+            host_ip = "127.0.0.1"
+        
+        self.my_player_name = player_name
+        self.game_mode = "client"
+        
+        print(f"\n正在连接到 {host_ip}:8888 ...")
+        
+        # 创建客户端
+        self.client = GameClient(player_name)
+        self.client.on_state_update = self._on_client_state_update
+        self.client.on_your_turn = self._on_client_your_turn
+        self.client.on_error = self._on_client_error
+        self.client.on_disconnect = self._on_client_disconnect
+        self.client.on_game_start = self._on_client_game_start
+        
+        if not self.client.connect(host_ip, 8888):
+            print("连接失败!")
+            self.game_mode = "single"
+            self.client = None
+            return
+        
+        print("连接成功! 等待房主开始游戏...")
+        
+        # 等待游戏开始
+        self.client_game_started = False
+        while not self.client_game_started:
+            try:
+                time.sleep(0.5)
+            except KeyboardInterrupt:
+                self.client.disconnect()
+                self.client = None
+                self.game_mode = "single"
+                return
+        
+        # 运行客户端游戏循环
+        self._run_client_game()
+
+    # 联机模式回调函数
+    def _on_remote_player_join(self, player_name):
+        """远程玩家加入回调"""
+        print(f"\n[系统] 玩家 {player_name} 加入了房间")
+        if player_name not in self.remote_players:
+            self.remote_players.append(player_name)
+
+    def _on_remote_player_leave(self, player_name):
+        """远程玩家离开回调"""
+        print(f"\n[系统] 玩家 {player_name} 离开了房间")
+        if player_name in self.remote_players:
+            self.remote_players.remove(player_name)
+
+    def _on_remote_action_received(self, player_name, action, amount):
+        """接收到远程玩家操作"""
+        self.remote_action_received = (player_name, action, amount)
+        self.is_waiting_for_remote = False
+
+    def _on_client_state_update(self, state_data):
+        """客户端接收到状态更新"""
+        self.client_current_state = state_data
+
+    def _on_client_your_turn(self, timeout):
+        """客户端轮到行动"""
+        self.client_my_turn = True
+        self.turn_countdown = timeout
+
+    def _on_client_error(self, error_msg):
+        """客户端错误"""
+        print(f"\n[网络错误] {error_msg}")
+
+    def _on_client_disconnect(self):
+        """客户端断开连接"""
+        print("\n[系统] 与服务器断开连接")
+        self.client_connected = False
+
+    def _on_client_game_start(self):
+        """客户端游戏开始"""
+        self.client_game_started = True
+        print("\n[系统] 游戏开始!")
 
     def save_game_menu(self):
         """显示保存游戏菜单"""
@@ -3250,3 +3458,323 @@ class CLI:
         print("  • 加注(raise/r [金额]): 增加下注额")
         print("  • 全押(allin/a): 下注所有剩余筹码")
         print("\n" + "=" * 60)
+
+    # ========== 联机模式游戏运行方法 ==========
+
+    def _run_host_game(self):
+        """房主运行联机游戏"""
+        import texas_holdem.utils.constants as constants
+        
+        # 创建游戏引擎
+        self.game_engine = GameEngine(self.player_names, constants.INITIAL_CHIPS)
+        
+        # 设置玩家类型
+        ai_count = 0
+        for player in self.game_engine.players:
+            if player.name.startswith("电脑"):
+                player.is_ai = True
+                ai_count += 1
+                # 分配风格
+                styles = ['TAG', 'LAG', 'LAP', 'LP']
+                style = random.choice(styles)
+                player.ai_style = style
+                self.player_styles[player.name] = style
+            elif player.name == self.my_player_name:
+                player.is_ai = False  # 房主是人类
+            else:
+                player.is_ai = False  # 远程玩家
+        
+        self.initial_ai_count = ai_count
+        self.blind_level = 1
+        
+        # 初始化统计
+        self._initialize_player_stats()
+        self._initialize_opponent_stats(self.game_engine.players)
+        
+        game_state = self.game_engine.game_state
+        hand_number = 0
+        
+        print(f"\n{'='*50}")
+        print("联机游戏开始!")
+        print(f"{'='*50}")
+        
+        while True:
+            hand_number += 1
+            self.total_hands += 1
+            
+            print(f"\n{'='*50}")
+            print(f"第 {hand_number} 手牌")
+            print(f"{'='*50}")
+            
+            # 开始新手牌
+            self.game_engine.start_new_hand()
+            self._clear_pending_actions()
+            self.current_stage_name = "翻牌前"
+            
+            # 更新手牌计数
+            for player in game_state.players:
+                if player.name in self.player_stats:
+                    self.player_stats[player.name]['hands_played'] += 1
+            
+            # 广播游戏状态
+            self._broadcast_game_state()
+            
+            # 运行下注轮次
+            if not self._run_network_betting_round():
+                break
+            
+            # 检查游戏结束
+            active_players = [p for p in game_state.players if p.chips > 0]
+            if len(active_players) < 2:
+                break
+            
+            # 自动保存
+            self.autosave_game()
+        
+        # 游戏结束
+        SaveManager.delete_autosave()
+        print(f"\n{'='*50}")
+        print(f"游戏结束! 共进行了 {hand_number} 手牌")
+        self._print_stats_report()
+        
+        # 停止服务器
+        if self.server:
+            self.server.stop()
+            self.server = None
+        self.game_mode = "single"
+
+    def _run_client_game(self):
+        """客户端运行联机游戏"""
+        print("\n等待游戏状态...")
+        
+        self.client_connected = True
+        self.client_current_state = None
+        self.client_my_turn = False
+        
+        while self.client_connected:
+            try:
+                # 显示当前状态
+                if self.client_current_state:
+                    self._display_client_state(self.client_current_state)
+                    self.client_current_state = None
+                
+                # 检查是否轮到行动
+                if self.client_my_turn:
+                    self._handle_client_turn()
+                    self.client_my_turn = False
+                
+                time.sleep(0.1)
+                
+            except KeyboardInterrupt:
+                break
+        
+        # 断开连接
+        if self.client:
+            self.client.disconnect()
+            self.client = None
+        self.game_mode = "single"
+
+    def _display_client_state(self, state_data):
+        """客户端显示游戏状态"""
+        print("\n" + "="*60)
+        
+        # 显示手牌号
+        hand = state_data.get('hand_number', 0)
+        print(f"第 {hand} 手牌")
+        
+        # 显示公共牌
+        community_cards = state_data.get('community_cards', [])
+        if community_cards:
+            cards_str = ' '.join([f"{c['rank']}{c['suit']}" for c in community_cards])
+            print(f"公共牌: {cards_str}")
+        
+        # 显示底池
+        print(f"底池: {state_data.get('total_pot', 0)}")
+        
+        # 显示玩家信息
+        print("\n玩家:")
+        for p in state_data.get('players', []):
+            marker = ""
+            if p['name'] == state_data.get('current_player'):
+                marker = " [当前行动]"
+            elif not p['is_active']:
+                marker = " [已弃牌]"
+            print(f"  {p['name']}: 筹码{p['chips']} 下注{p['bet_amount']}{marker}")
+        
+        # 显示当前轮到谁
+        current = state_data.get('current_player', '')
+        timeout = state_data.get('timeout', 15)
+        if current == self.my_player_name:
+            print(f"\n*** 轮到您行动! (剩余 {timeout} 秒) ***")
+        else:
+            print(f"\n等待 {current} 行动... ({timeout}秒)")
+        
+        print("="*60)
+
+    def _handle_client_turn(self):
+        """客户端处理自己的回合"""
+        print("\n请选择行动:")
+        print("  f: 弃牌  c: 跟注  r [金额]: 加注  a: 全押")
+        
+        start_time = time.time()
+        action_input = ""
+        
+        # 15秒倒计时输入
+        while time.time() - start_time < self.turn_countdown:
+            remaining = int(self.turn_countdown - (time.time() - start_time))
+            if remaining <= 5 and remaining > 0:
+                print(f"\r[倒计时 {remaining} 秒] ", end="", flush=True)
+            
+            # 尝试获取输入（非阻塞）
+            import select
+            import sys
+            
+            if hasattr(select, 'select'):
+                # Unix/Linux/Mac
+                ready, _, _ = select.select([sys.stdin], [], [], 0.1)
+                if ready:
+                    action_input = input().strip().lower()
+                    break
+            else:
+                # Windows - 简单处理
+                try:
+                    action_input = input().strip().lower()
+                    break
+                except:
+                    pass
+        
+        if not action_input:
+            print("\n[超时] 自动弃牌")
+            action_input = "f"
+        
+        # 解析行动
+        parts = action_input.split()
+        action = parts[0]
+        amount = 0
+        
+        if action in ['r', 'raise'] and len(parts) > 1:
+            try:
+                amount = int(parts[1])
+            except:
+                amount = 0
+        
+        # 映射行动
+        action_map = {
+            'f': 'fold', 'fold': 'fold',
+            'c': 'call', 'call': 'call', 'k': 'check', 'check': 'check',
+            'r': 'raise', 'raise': 'raise',
+            'b': 'bet', 'bet': 'bet',
+            'a': 'all_in', 'allin': 'all_in', 'all_in': 'all_in'
+        }
+        
+        action = action_map.get(action, 'fold')
+        
+        # 发送行动
+        if self.client:
+            self.client.send_action(action, amount)
+            print(f"已发送: {action} {amount}")
+
+    def _broadcast_game_state(self):
+        """房主广播游戏状态"""
+        if not self.server or not self.game_engine:
+            return
+        
+        game_state = self.game_engine.game_state
+        current_player = game_state.get_current_player()
+        current_name = current_player.name if current_player else ""
+        
+        self.server.broadcast_game_state(
+            game_state, 
+            self.game_engine.players,
+            current_name
+        )
+
+    def _run_network_betting_round(self) -> bool:
+        """运行网络下注轮次"""
+        if not self.game_engine:
+            return False
+        
+        game_state = self.game_engine.game_state
+        betting_round = self.game_engine.betting_round
+        
+        while not game_state.is_betting_round_complete():
+            current_player = game_state.get_current_player()
+            if not current_player:
+                break
+            
+            # 通知轮到该玩家
+            self._broadcast_game_state()
+            
+            if current_player.name == self.my_player_name:
+                # 房主自己的回合
+                action, amount = self.get_player_action(current_player, betting_round)
+            elif not current_player.is_ai:
+                # 远程玩家回合 - 等待接收操作
+                action, amount = self._wait_for_remote_action(current_player.name)
+            else:
+                # AI玩家回合
+                action, amount = self.get_ai_action(current_player, betting_round)
+                time.sleep(0.5)  # 稍微延迟，让远程玩家能看到
+            
+            # 执行行动
+            success, message, bet_amount = betting_round.process_action(
+                current_player, action, amount
+            )
+            
+            if success:
+                # 广播行动
+                action_msg = GameMessage(
+                    MessageType.PLAYER_ACTION,
+                    {
+                        'player': current_player.name,
+                        'action': str(action).lower(),
+                        'amount': bet_amount
+                    }
+                )
+                if self.server:
+                    self.server.broadcast(action_msg)
+                
+                game_state.next_player()
+            else:
+                print(f"行动失败: {message}")
+        
+        return True
+
+    def _wait_for_remote_action(self, player_name: str, timeout: int = 15) -> tuple:
+        """等待远程玩家操作"""
+        print(f"\n等待 {player_name} 行动...")
+        
+        # 通知轮到该玩家
+        if self.server:
+            self.server.notify_turn(player_name)
+        
+        self.is_waiting_for_remote = True
+        self.remote_action_received = None
+        
+        start_time = time.time()
+        while self.is_waiting_for_remote:
+            if time.time() - start_time > timeout:
+                print(f"\n[超时] {player_name} 自动弃牌")
+                self.is_waiting_for_remote = False
+                return Action.FOLD, 0
+            
+            if self.remote_action_received:
+                _, action_str, amount = self.remote_action_received
+                self.remote_action_received = None
+                
+                # 转换行动字符串为Action
+                action_map = {
+                    'fold': Action.FOLD,
+                    'check': Action.CHECK,
+                    'call': Action.CALL,
+                    'bet': Action.BET,
+                    'raise': Action.RAISE,
+                    'all_in': Action.ALL_IN
+                }
+                action = action_map.get(action_str, Action.FOLD)
+                return action, amount
+            
+            time.sleep(0.1)
+        
+        # 默认弃牌
+        return Action.FOLD, 0
