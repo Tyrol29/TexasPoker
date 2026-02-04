@@ -1,36 +1,252 @@
 """
 鲨鱼AI - 自适应学习对手风格的AI
+包含：位置感知、精确赔率计算、SPR策略、听牌评估
 """
 
 import random
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 from texas_holdem.core.player import Player
 from texas_holdem.game.betting import BettingRound
 from texas_holdem.utils.constants import GameState
+from texas_holdem.core.card import Card
+
+
+class DrawEvaluator:
+    """听牌评估器"""
+    
+    @staticmethod
+    def identify_draws(hole_cards: List[Card], community_cards: List[Card]) -> Dict[str, Any]:
+        """识别所有可能的听牌"""
+        draws = {}
+        if not community_cards:
+            return draws
+        
+        all_cards = hole_cards + community_cards
+        values = sorted(set([c.value for c in all_cards]))
+        suits = [c.suit for c in all_cards]
+        
+        # 同花听牌检测
+        for suit in set(suits):
+            suited_cards = [c for c in all_cards if c.suit == suit]
+            if len(suited_cards) == 4:
+                # 检查是否是后门同花（只有2张同花色）
+                hole_suited = [c for c in hole_cards if c.suit == suit]
+                if len(hole_suited) >= 1:
+                    draws['flush_draw'] = {'outs': 9, 'equity': 0.35}
+        
+        # 检查后门同花
+        for suit in set(suits):
+            suited_count = suits.count(suit)
+            if suited_count == 3 and len(community_cards) == 3:
+                draws['backdoor_flush'] = {'outs': 1, 'equity': 0.04}
+        
+        # 顺子听牌检测
+        if len(values) >= 4:
+            # 检查两端顺子听牌 (OESD)
+            for i in range(len(values) - 3):
+                if values[i+3] - values[i] == 3 and len(set(values[i:i+4])) == 4:
+                    draws['oesd'] = {'outs': 8, 'equity': 0.31}
+                    break
+            
+            # 检查卡顺听牌 (Gutshot)
+            for i in range(len(values) - 3):
+                gap = values[i+3] - values[i]
+                if gap == 4 and len(set(values[i:i+4])) == 4:
+                    draws['gutshot'] = {'outs': 4, 'equity': 0.16}
+                    break
+        
+        # 检查高牌 Outs
+        hole_values = sorted([c.value for c in hole_cards], reverse=True)
+        if hole_values[0] >= 12:  # A或K
+            overcard_outs = sum(1 for v in hole_values if v > max(community_cards, key=lambda x: x.value).value)
+            if overcard_outs > 0:
+                draws['overcards'] = {'outs': overcard_outs * 3, 'equity': overcard_outs * 0.12}
+        
+        # 组合听牌
+        if 'flush_draw' in draws and 'oesd' in draws:
+            draws['combo_draw'] = {'outs': 15, 'equity': 0.54}
+        elif 'flush_draw' in draws and 'gutshot' in draws:
+            draws['combo_draw'] = {'outs': 12, 'equity': 0.45}
+        
+        return draws
+    
+    @staticmethod
+    def calculate_total_equity(draws: Dict) -> float:
+        """计算听牌总胜率"""
+        if not draws:
+            return 0.0
+        # 取最大equity，避免重复计算
+        return max(d['equity'] for d in draws.values())
+
+
+class PositionAwareness:
+    """位置感知系统"""
+    
+    # 位置价值乘数（影响入池阈值）
+    POSITION_MULTIPLIERS = {
+        'EP': 0.70,    # 早位：收紧
+        'MP': 0.85,    # 中位：标准
+        'CO': 1.10,    # Cutoff：抢盲位置，放宽
+        'BTN': 1.25,   # 按钮位：最大优势，大幅放宽
+        'SB': 0.90,    # 小盲：位置劣势但可能有价格
+        'BB': 1.00,    # 大盲：最后行动，有价格优势
+    }
+    
+    @classmethod
+    def get_position(cls, player: Player, total_players: int = 6) -> str:
+        """确定玩家位置"""
+        if player.is_dealer:
+            return 'BTN'
+        elif player.is_small_blind:
+            return 'SB'
+        elif player.is_big_blind:
+            return 'BB'
+        else:
+            # 根据与庄家的距离判断
+            # 简化处理：6人桌时，BTN前两个是CO和MP，再往前是EP
+            return 'MP'  # 简化处理
+    
+    @classmethod
+    def get_adjusted_threshold(cls, base_threshold: float, position: str) -> float:
+        """根据位置调整入池阈值"""
+        multiplier = cls.POSITION_MULTIPLIERS.get(position, 1.0)
+        return base_threshold * multiplier
+
+
+class PotOddsCalculator:
+    """底池赔率计算器（包含隐含赔率）"""
+    
+    @staticmethod
+    def calculate_direct_odds(amount_to_call: int, total_pot: int) -> float:
+        """计算直接赔率"""
+        if amount_to_call <= 0:
+            return 0.0
+        return amount_to_call / (total_pot + amount_to_call)
+    
+    @staticmethod
+    def calculate_implied_odds(amount_to_call: int, total_pot: int, 
+                               effective_stack: int, street: str,
+                               draw_equity: float) -> Dict[str, float]:
+        """计算隐含赔率
+        
+        Args:
+            amount_to_call: 需要跟注的金额
+            total_pot: 当前底池
+            effective_stack: 有效筹码（最小筹码量）
+            street: 'flop', 'turn', 'river'
+            draw_equity: 听牌胜率
+        """
+        if amount_to_call <= 0:
+            return {'total_equity': 0.0, 'should_call': True}
+        
+        # 街数乘数（后续还能赢多少）
+        street_multiplier = {'flop': 2.5, 'turn': 1.3, 'river': 1.0}
+        multiplier = street_multiplier.get(street, 1.0)
+        
+        # 估算后续能赢的平均金额（基于听牌强度和剩余筹码）
+        potential_future_win = min(effective_stack * 0.3 * draw_equity * multiplier, 
+                                   effective_stack * 0.5)
+        
+        # 总底池 = 当前底池 + 未来可能赢的
+        total_potential = total_pot + potential_future_win
+        
+        # 直接胜率需求
+        direct_equity_needed = amount_to_call / (total_pot + amount_to_call)
+        
+        # 考虑隐含赔率后的实际胜率需求
+        if total_potential > amount_to_call:
+            implied_equity_needed = amount_to_call / total_potential
+        else:
+            implied_equity_needed = direct_equity_needed
+        
+        return {
+            'direct_equity_needed': direct_equity_needed,
+            'implied_equity_needed': implied_equity_needed,
+            'potential_future_win': potential_future_win,
+            'should_call': draw_equity > implied_equity_needed * 0.9  # 稍微放宽
+        }
+
+
+class SPRStrategy:
+    """SPR（筹码底池比）策略"""
+    
+    @staticmethod
+    def calculate_spr(effective_stack: int, pot: int) -> float:
+        """计算SPR值"""
+        if pot <= 0:
+            return float('inf')
+        return effective_stack / pot
+    
+    @classmethod
+    def get_strategy_by_spr(cls, spr: float, hand_strength: float, 
+                           draw_equity: float = 0) -> Dict[str, Any]:
+        """根据SPR和手牌强度获取策略"""
+        
+        total_equity = hand_strength * 0.7 + draw_equity * 0.3
+        
+        if spr > 15:
+            # 深筹码：玩隐含赔率，投机牌有价值
+            return {
+                'play_speculative': True,
+                'set_mine': True,
+                'commit_threshold': 0.75,
+                'avoid_light_commit': True,
+                'hand_requirement': 0.55
+            }
+        elif spr > 7:
+            # 中等筹码：平衡策略
+            return {
+                'play_speculative': draw_equity > 0.25,
+                'set_mine': True,
+                'commit_threshold': 0.65,
+                'avoid_light_commit': False,
+                'hand_requirement': 0.50
+            }
+        elif spr > 3:
+            # 短筹码：追求全押，不玩投机牌
+            return {
+                'play_speculative': False,
+                'set_mine': False,
+                'commit_threshold': 0.55,
+                'avoid_light_commit': False,
+                'hand_requirement': 0.48,
+                'push_fold': False
+            }
+        else:
+            # 超短筹码：全押或弃牌
+            return {
+                'play_speculative': False,
+                'set_mine': False,
+                'commit_threshold': 0.45,
+                'avoid_light_commit': False,
+                'hand_requirement': 0.42,
+                'push_fold': True  # 全押或弃牌模式
+            }
 
 
 class SharkAI:
     """
-    鲨鱼AI - 自适应学习AI
+    鲨鱼AI - 自适应学习AI v2.0
     
-    特点：
-    1. 初始使用GTO平衡策略
-    2. 观察对手行为（20手后激活学习）
-    3. 每轮根据对手数据动态调整策略
-    4. 对手容易弃牌就多诈唬，对手喜欢诈唬就打更紧
+    核心改进：
+    1. 位置感知系统 - 根据位置调整范围
+    2. 精确赔率计算 - 直接赔率+隐含赔率
+    3. SPR策略 - 根据筹码深度调整
+    4. 听牌评估 - 精确识别和评估听牌
+    5. 对手学习 - 20手后自适应调整
     """
     
     def __init__(self):
         # 初始使用紧弱(LAP)风格，学习后动态调整
         self.base_config = {
-            'vpip_range': (15, 22),      # 紧 - 只玩好牌
-            'pfr_range': (5, 12),        # 弱 - 少加注多跟注
-            'af_factor': 1.0,            # 低攻击性
-            'bluff_freq': 0.05,          # 很少诈唬
-            'call_preflop': 0.40,        # 喜欢跟注
-            'raise_preflop': 0.10,       # 很少加注
-            'bet_postflop': 0.20,        # 翻牌后下注少
-            'fold_to_raise': 0.50,       # 容易被加注吓跑
+            'vpip_range': (15, 22),
+            'pfr_range': (5, 12),
+            'af_factor': 1.0,
+            'bluff_freq': 0.05,
+            'call_preflop': 0.40,
+            'raise_preflop': 0.10,
+            'bet_postflop': 0.20,
+            'fold_to_raise': 0.50,
             'adaptation_start': 20,
             'learning_rate': 0.1,
         }
@@ -40,12 +256,23 @@ class SharkAI:
         self.adaptation_active = False
         self.hands_observed = 0
         self.current_config = self.base_config.copy()
+        
+        # 子系统
+        self.draw_evaluator = DrawEvaluator()
+        self.position_awareness = PositionAwareness()
+        self.pot_odds_calc = PotOddsCalculator()
+        self.spr_strategy = SPRStrategy()
+        
+        # 游戏状态追踪
+        self.current_street = 'preflop'
+        self.total_pot = 0
+        self.effective_stack = 0
     
     def initialize_opponents(self, players: List[Player]):
         """初始化对手追踪"""
         self.opponent_data = {}
         for player in players:
-            if not player.is_ai or player.ai_style != 'SHARK':
+            if not player.is_ai or getattr(player, 'ai_style', 'LAG') != 'SHARK':
                 self.opponent_data[player.name] = {
                     'hands_observed': 0,
                     'folds': 0,
@@ -57,7 +284,6 @@ class SharkAI:
                     'cbet_opportunities': 0,
                     'showdown_wins': 0,
                     'showdowns': 0,
-                    # 倾向值（0-1）
                     'fold_tendency': 0.5,
                     'bluff_tendency': 0.5,
                     'calling_tendency': 0.5,
@@ -68,11 +294,7 @@ class SharkAI:
     
     def update_after_action(self, player_name: str, action: str, street: str,
                            is_bluff: bool = False, facing_cbet: bool = False):
-        """
-        每轮行动后更新对手数据
-        
-        这是关键方法，确保每轮都能追踪对手行为
-        """
+        """每轮行动后更新对手数据"""
         if player_name not in self.opponent_data:
             return
         
@@ -80,7 +302,6 @@ class SharkAI:
         data['hands_observed'] += 1
         self.hands_observed += 1
         
-        # 记录行动
         if action == 'fold':
             data['folds'] += 1
             if facing_cbet:
@@ -95,17 +316,13 @@ class SharkAI:
         if facing_cbet:
             data['cbet_opportunities'] += 1
         
-        # 检查是否达到激活学习的条件
         if not self.adaptation_active:
             total_hands = sum(d['hands_observed'] for d in self.opponent_data.values())
             if total_hands >= self.base_config['adaptation_start']:
                 self.adaptation_active = True
-                print("\n[🦈 鲨鱼AI] 已收集足够数据，开始自适应调整策略...")
         
-        # 每5手更新一次倾向值（确保及时更新）
         if data['hands_observed'] % 5 == 0 or self.adaptation_active:
             self._calculate_tendencies(player_name)
-            # 每次更新后都重新计算策略
             if self.adaptation_active:
                 self._update_strategy()
     
@@ -117,16 +334,13 @@ class SharkAI:
         if hands < 3:
             return
         
-        # 弃牌倾向
         fold_rate = data['folds'] / hands
         data['fold_tendency'] = min(1.0, max(0.0, fold_rate * 2))
         
-        # 诈唬倾向
         if data['raises'] > 0:
             bluff_rate = data['bluffs_detected'] / data['raises']
             data['bluff_tendency'] = min(1.0, bluff_rate * 3)
         
-        # 跟注倾向
         if hands > data['folds']:
             calling_rate = data['calls'] / (hands - data['folds'])
             data['calling_tendency'] = min(1.0, max(0.0, calling_rate))
@@ -136,22 +350,20 @@ class SharkAI:
         if not self.opponent_data:
             return
         
-        # 计算所有对手的平均倾向
         avg_fold = sum(d['fold_tendency'] for d in self.opponent_data.values()) / len(self.opponent_data)
         avg_bluff = sum(d['bluff_tendency'] for d in self.opponent_data.values()) / len(self.opponent_data)
         avg_call = sum(d['calling_tendency'] for d in self.opponent_data.values()) / len(self.opponent_data)
         
-        # 基于倾向调整策略
         adjustments = []
         
-        # 对手容易弃牌 -> 增加诈唬，减少入池
+        # 对手容易弃牌 -> 增加诈唬
         if avg_fold > 0.6:
             self.current_config['bluff_freq'] = min(0.5, self.base_config['bluff_freq'] + 0.15)
             self.current_config['bet_postflop'] = min(0.7, self.base_config['bet_postflop'] + 0.15)
             self.current_config['af_factor'] = self.base_config['af_factor'] + 0.5
             adjustments.append("对手易弃牌→增加诈唬")
         
-        # 对手喜欢诈唬 -> 打得更紧，增加抓诈
+        # 对手喜欢诈唬 -> 打得更紧
         if avg_bluff > 0.4:
             self.current_config['vpip_range'] = (
                 max(15, self.base_config['vpip_range'][0] - 5),
@@ -161,59 +373,168 @@ class SharkAI:
             self.current_config['fold_to_raise'] = max(0.3, self.base_config['fold_to_raise'] - 0.1)
             adjustments.append("对手爱诈唬→收紧范围")
         
-        # 对手是跟注站 -> 减少诈唬，增加价值下注
+        # 对手跟注站 -> 减少诈唬，增加价值下注
         if avg_call > 0.5:
             self.current_config['bluff_freq'] = max(0.1, self.base_config['bluff_freq'] - 0.1)
             self.current_config['bet_postflop'] = self.base_config['bet_postflop'] + 0.1
             self.current_config['af_factor'] = self.base_config['af_factor'] + 0.3
             adjustments.append("对手跟注多→减少诈唬")
         
-        # 如果没有任何调整，恢复基础配置
         if not adjustments:
             self.current_config = self.base_config.copy()
-        
-        return adjustments
     
     def get_action(self, player: Player, betting_round: BettingRound,
                    hand_strength: float, win_probability: float,
                    pot_odds: float, ev: float) -> Tuple[Any, int]:
-        """
-        鲨鱼AI决策
-        """
+        """鲨鱼AI主决策方法"""
         from texas_holdem.utils.constants import Action
         
         game_state = betting_round.game_state
         available_actions = betting_round.get_available_actions(player)
         amount_to_call = betting_round.get_amount_to_call(player)
-        current_bet = game_state.current_bet
+        current_bet = game_state.current_bet if hasattr(game_state, 'current_bet') else 0
+        total_pot = game_state.pot if hasattr(game_state, 'pot') else 0
+        
+        # 获取位置信息
+        position = self.position_awareness.get_position(player)
+        
+        # 计算SPR和有效筹码
+        players = game_state.players if hasattr(game_state, 'players') else []
+        active_players = [p for p in players if p.is_active]
+        self.effective_stack = min(player.chips, 
+                                   sum(p.chips for p in active_players) / 
+                                   max(1, len(active_players) - 1))
+        spr = self.spr_strategy.calculate_spr(self.effective_stack, total_pot)
+        
+        # 识别听牌
+        hole_cards = player.hand.cards if player.hand else []
+        community_cards = game_state.table.community_cards if hasattr(game_state, 'table') else []
+        draws = self.draw_evaluator.identify_draws(hole_cards, community_cards)
+        draw_equity = self.draw_evaluator.calculate_total_equity(draws)
+        
+        # 确定当前街
+        street_map = {
+            GameState.PRE_FLOP: 'preflop',
+            GameState.FLOP: 'flop',
+            GameState.TURN: 'turn',
+            GameState.RIVER: 'river',
+            GameState.SHOWDOWN: 'river'
+        }
+        self.current_street = street_map.get(game_state.state, 'preflop')
         
         config = self.current_config
         is_preflop = (game_state.state == GameState.PRE_FLOP)
         
-        # 翻牌前紧弱起手牌选择（ tighter than before ）
-        if is_preflop:
-            if hand_strength < 0.58:  # 提高门槛，只玩更好的牌
-                # 如果可以免费看牌，优先check
-                if amount_to_call <= 0:
-                    return Action.CHECK, 0
-                if player.is_big_blind and amount_to_call <= 10:
-                    return Action.CALL, 0
-                return Action.FOLD, 0
-            # 中等牌力（0.58-0.68）根据位置谨慎游戏
-            elif hand_strength < 0.68:
-                is_late = player.is_dealer or player.is_small_blind
-                # 早位放弃，晚位才玩
-                if not is_late:
-                    if amount_to_call <= 0:
-                        return Action.CHECK, 0
-                    return Action.FOLD, 0
+        # 计算综合胜率（手牌+听牌）
+        total_equity = win_probability + draw_equity * 0.5
         
-        # 根据手牌强度和当前配置选择行动
-        action_weights = self._calculate_shark_weights(hand_strength, config)
+        # 计算精确赔率
+        direct_odds = self.pot_odds_calc.calculate_direct_odds(amount_to_call, total_pot)
+        implied_calc = self.pot_odds_calc.calculate_implied_odds(
+            amount_to_call, total_pot, self.effective_stack, 
+            self.current_street, draw_equity
+        )
+        
+        # SPR策略指导
+        spr_guidance = self.spr_strategy.get_strategy_by_spr(spr, hand_strength, draw_equity)
+        
+        # 翻牌前决策
+        if is_preflop:
+            return self._preflop_decision(
+                player, available_actions, amount_to_call, 
+                hand_strength, position, spr_guidance, config
+            )
+        
+        # 翻牌后决策
+        return self._postflop_decision(
+            player, available_actions, amount_to_call, current_bet,
+            hand_strength, draw_equity, total_equity, direct_odds, 
+            implied_calc, spr_guidance, config, draws
+        )
+    
+    def _preflop_decision(self, player, available_actions, amount_to_call,
+                         hand_strength, position, spr_guidance, config) -> Tuple[Any, int]:
+        """翻牌前决策"""
+        from texas_holdem.utils.constants import Action
+        
+        available_names = [str(a).lower().replace('action.', '') for a in available_actions]
+        
+        # 位置调整后的阈值
+        base_threshold = 0.58
+        adjusted_threshold = self.position_awareness.get_adjusted_threshold(base_threshold, position)
+        
+        # 深筹码时小对子投机暗三
+        can_set_mine = spr_guidance.get('set_mine', False) and hand_strength >= 0.45
+        
+        # 极紧范围（早位）
+        if hand_strength < adjusted_threshold and not can_set_mine:
+            if amount_to_call <= 0 and 'check' in available_names:
+                return Action.CHECK, 0
+            if player.is_big_blind and amount_to_call <= 10:
+                return Action.CALL, 0
+            return Action.FOLD, 0
+        
+        # 中等牌力根据位置和SPR决定
+        if hand_strength < 0.68:
+            if position in ['EP', 'MP'] and amount_to_call > 20:
+                return Action.FOLD, 0
+            if amount_to_call <= 0:
+                return Action.CHECK, 0
+            # 小对子投机
+            if can_set_mine and amount_to_call <= self.effective_stack * 0.05:
+                return Action.CALL, 0
+        
+        # 强牌加注
+        if hand_strength >= 0.70:
+            if 'raise' in available_names:
+                raise_amount = max(40, amount_to_call + 20)
+                return Action.RAISE, raise_amount
+            elif 'bet' in available_names:
+                return Action.BET, 40
+        
+        # 其他情况跟注或看牌
+        if amount_to_call <= 0:
+            return Action.CHECK, 0
+        elif 'call' in available_names:
+            return Action.CALL, 0
+        else:
+            return Action.FOLD, 0
+    
+    def _postflop_decision(self, player, available_actions, amount_to_call,
+                          current_bet, hand_strength, draw_equity, total_equity,
+                          direct_odds, implied_calc, spr_guidance, config, draws) -> Tuple[Any, int]:
+        """翻牌后决策"""
+        from texas_holdem.utils.constants import Action
+        
+        available_names = [str(a).lower().replace('action.', '') for a in available_actions]
+        
+        # 超短筹码全押或弃牌模式
+        if spr_guidance.get('push_fold', False):
+            if total_equity >= spr_guidance['commit_threshold']:
+                return Action.ALL_IN, player.chips
+            else:
+                return Action.FOLD, 0
+        
+        # 有听牌时的决策
+        if draw_equity > 0.15:
+            # 检查赔率是否足够
+            if implied_calc['should_call'] and 'call' in available_names:
+                return Action.CALL, 0
+            # 强听牌可以半诈唬加注
+            if draw_equity > 0.30 and 'raise' in available_names and hand_strength < 0.5:
+                return Action.RAISE, max(40, current_bet + 20)
+        
+        # 基于手牌强度的权重计算
+        action_weights = self._calculate_postflop_weights(
+            hand_strength, draw_equity, config, spr_guidance
+        )
         
         # 过滤可用行动
-        available_names = [str(a).lower().replace('action.', '') for a in available_actions]
         valid = {k: v for k, v in action_weights.items() if k in available_names and v > 0}
+        
+        # 如果可以check，避免fold
+        if 'check' in available_names and 'fold' in valid:
+            del valid['fold']
         
         if not valid:
             return Action.FOLD, 0
@@ -221,7 +542,6 @@ class SharkAI:
         # 加权选择
         action_name = self._weighted_choice(valid)
         
-        # 映射到Action
         action_map = {
             'fold': Action.FOLD,
             'check': Action.CHECK,
@@ -233,91 +553,85 @@ class SharkAI:
         action = action_map.get(action_name, Action.FOLD)
         
         # 计算金额
-        amount = self._calculate_shark_amount(
-            action, player, amount_to_call, current_bet, hand_strength, config
+        amount = self._calculate_amount(
+            action, player, amount_to_call, current_bet, 
+            hand_strength, draw_equity, config
         )
         
         return action, amount
     
-    def _calculate_shark_weights(self, hand_strength: float, config: Dict) -> Dict[str, float]:
-        """计算鲨鱼AI的行动权重 - 紧弱(LAP)风格"""
+    def _calculate_postflop_weights(self, hand_strength: float, draw_equity: float,
+                                    config: Dict, spr_guidance: Dict) -> Dict[str, float]:
+        """计算翻牌后行动权重"""
         weights = {'fold': 0, 'check': 0, 'call': 0, 'bet': 0, 'raise': 0, 'all_in': 0}
         
-        # 紧弱调整
-        adjusted = hand_strength - 0.05  # 更保守
+        total_equity = hand_strength * 0.7 + draw_equity * 0.3
+        bluff_freq = config['bluff_freq']
+        af = config['af_factor']
         
-        bluff_freq = config['bluff_freq']  # 低诈唬频率 (0.05)
-        af = config['af_factor']  # 低攻击性 (1.0)
-        
-        if adjusted > 0.75:  # 超强牌
-            # 即使强牌也更喜欢跟注而不是加注
+        if total_equity > 0.80:  # 坚果或接近坚果
+            weights.update({
+                'raise': 0.50,
+                'bet': 0.35,
+                'call': 0.15
+            })
+        elif total_equity > 0.60:  # 强牌
+            weights.update({
+                'bet': 0.45,
+                'raise': 0.25,
+                'call': 0.25,
+                'check': 0.05
+            })
+        elif total_equity > 0.45:  # 中等牌
             weights.update({
                 'call': 0.45,
-                'bet': 0.30,
-                'raise': 0.25,
-            })
-        elif adjusted > 0.55:  # 强牌
-            # 被动地跟注，少加注
-            weights.update({
-                'call': 0.50,
-                'bet': 0.25,
-                'raise': 0.15,
-                'fold': 0.10,
-            })
-        elif adjusted > 0.40:  # 中等牌
-            # 更多地跟注看牌，少下注
-            weights.update({
-                'call': 0.55,
-                'check': 0.20,
-                'fold': 0.15,
-                'bet': 0.08,
-                'raise': 0.02,
-            })
-        elif adjusted > 0.30:  # 中等偏弱
-            # 紧弱风格：能弃就弃，能check就check，很少诈唬
-            weights.update({
-                'fold': 0.40,
-                'check': 0.35,
-                'call': 0.22,
-                'bet': 0.02 * bluff_freq * 10,  # 极少诈唬
-                'raise': 0.01 * bluff_freq * 10
-            })
-        else:  # 弱牌
-            # 紧弱：弃牌或check，基本不诈唬
-            weights.update({
-                'fold': 0.60,
                 'check': 0.30,
-                'call': 0.09,
-                'bet': 0.01 * bluff_freq * 10  # 几乎不诈唬
+                'bet': 0.15,
+                'fold': 0.10
+            })
+        elif total_equity > 0.30 or draw_equity > 0.15:  # 弱牌+听牌
+            weights.update({
+                'call': 0.35,
+                'check': 0.30,
+                'fold': 0.25,
+                'bet': 0.08 * bluff_freq * 10
+            })
+        else:  # 纯弱牌
+            weights.update({
+                'fold': 0.55,
+                'check': 0.35,
+                'call': 0.08,
+                'bet': 0.02 * bluff_freq * 10
             })
         
         return weights
     
-    def _calculate_shark_amount(self, action, player, amount_to_call, current_bet,
-                                hand_strength, config) -> int:
-        """计算鲨鱼AI的下注金额"""
-        if action == 'fold' or action == 'check':
-            return 0
-        elif action == 'call':
+    def _calculate_amount(self, action, player, amount_to_call, current_bet,
+                         hand_strength, draw_equity, config) -> int:
+        """计算下注金额"""
+        if action in ['fold', 'check', 'call']:
             return 0
         elif action == 'all_in':
             return player.chips
         
         big_blind = 20
         af = config['af_factor']
+        total_strength = hand_strength + draw_equity * 0.5
         
         if current_bet == 0:  # bet
-            if hand_strength > 0.75:
+            if total_strength > 0.80:
                 return big_blind * int(3 + af * 0.5)
-            elif hand_strength > 0.55:
+            elif total_strength > 0.60:
                 return big_blind * int(2.5 + af * 0.3)
+            elif draw_equity > 0.25:
+                return big_blind * 3  # 听牌半诈唬
             else:
                 return big_blind * 2
         else:  # raise
             min_raise = max(big_blind * 2, current_bet)
-            if hand_strength > 0.75:
+            if total_strength > 0.80:
                 return min_raise + big_blind * int(2 + af * 0.3)
-            elif hand_strength > 0.55:
+            elif total_strength > 0.60:
                 return min_raise + big_blind * int(1 + af * 0.2)
             else:
                 return min_raise
