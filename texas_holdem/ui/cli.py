@@ -545,7 +545,7 @@ class CLI:
         print(f"\n玩家人数: {len(self.player_names)}人 (AI×{ai_count}, 人类×{human_count})")
         print(f"初始筹码: {INITIAL_CHIPS}")
         print(f"初始盲注: 小盲{SMALL_BLIND}, 大盲{BIG_BLIND}")
-        print(f"盲注规则: 第一个电脑被淘汰后，盲注翻倍！")
+        print(f"盲注规则: 每淘汰一名电脑，盲注翻倍！")
         
         # 显示各电脑玩家的打法风格说明
         print(f"\n[打法风格说明]")
@@ -659,9 +659,9 @@ class CLI:
                 remaining_human = len([p for p in game_state.players if not p.is_ai])
                 print(f"\n剩余玩家: 电脑×{remaining_ai}, 人类×{remaining_human}")
                 
-                # 检查是否是第一个电脑被淘汰，触发盲注翻倍
+                # 每淘汰一名电脑，盲注翻倍
                 eliminated_ai_count = sum(1 for _, is_ai in eliminated if is_ai)
-                if eliminated_ai_count > 0 and not self.blind_doubled:
+                for _ in range(eliminated_ai_count):
                     self._increase_blinds()
                 
                 # 如果只剩一个玩家，结束游戏
@@ -1288,7 +1288,6 @@ class CLI:
         constants.BIG_BLIND = new_bb
         
         self.blind_level += 1
-        self.blind_doubled = True
         
         print(f"\n{'='*60}")
         print("[盲注升级]")
@@ -1296,7 +1295,7 @@ class CLI:
         print(f"  第 {self.blind_level} 级别")
         print(f"  小盲注: {old_sb} → {new_sb}")
         print(f"  大盲注: {old_bb} → {new_bb}")
-        print(f"  第一个电脑已被淘汰，盲注翻倍！")
+        print(f"  电脑被淘汰，盲注翻倍！")
         print(f"{'='*60}")
 
     def _classify_player_style(self, vpip, pfr, af):
@@ -1834,8 +1833,9 @@ class CLI:
                 remaining_human = len([p for p in game_state.players if not p.is_ai])
                 print(f"\n剩余玩家: 电脑x{remaining_ai}, 人类x{remaining_human}")
                 
+                # 每淘汰一名电脑，盲注翻倍
                 eliminated_ai_count = sum(1 for _, is_ai in eliminated if is_ai)
-                if eliminated_ai_count > 0 and not self.blind_doubled:
+                for _ in range(eliminated_ai_count):
                     self._increase_blinds()
                 
                 if len(game_state.players) < 2:
