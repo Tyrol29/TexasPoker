@@ -741,11 +741,12 @@ class CLI:
             street = street_map.get(game_state.state, 'unknown')
             action_str = str(action).lower().replace('action.', '')
             
-            # 检测是否是偷盲位置（CO/BTN位置且前面都弃牌）
+            # 检测是否是偷盲位置（CO/BTN/SB位置且前面都弃牌）
             is_steal_position = False
-            if street == 'preflop' and current_player.is_ai:
+            if street == 'preflop':
                 position = self._get_position_name(current_player, game_state.players, game_state)
-                if position in ['CO', 'BTN', 'HJ'] and len(players_acted) > 0:
+                # CO( cutoff), BTN(按钮), SB(小盲)是偷盲位置
+                if position in ['CO', 'BTN', 'SB'] and len(players_acted) > 0:
                     # 检查前面是否都弃牌了
                     all_folded = all(p_action == 'fold' for p_name, p_action in players_acted)
                     if all_folded:
@@ -754,8 +755,11 @@ class CLI:
             # 检测是否是C-bet机会（翻牌前加注者在翻牌圈第一个行动）
             is_cbet_opportunity = False
             if street == 'flop' and preflop_raiser == current_player.name:
-                # 翻牌前加注者，且在翻牌圈第一个行动
-                is_cbet_opportunity = True
+                # 翻牌前加注者，且在翻牌圈第一个行动（前面没人下注/加注）
+                # 检查翻牌圈是否已有下注
+                flop_bet_made = any(p.bet_amount > 0 for p in game_state.players if p.is_active)
+                if not flop_bet_made:
+                    is_cbet_opportunity = True
             
             # 检测是否面对3bet（当前需要跟注的金额 >= 60）
             amount_to_call = betting_round.get_amount_to_call(current_player)
@@ -1653,6 +1657,47 @@ class CLI:
         self.initial_ai_count = save_data.get('initial_ai_count', 0)
         self.blind_level = save_data.get('blind_level', 1)
         self.blind_doubled = save_data.get('blind_doubled', False)
+        
+        # 确保所有玩家统计字段都存在（兼容旧存档）
+        default_stats = {
+            'hands_played': 0,
+            'vpip': 0,
+            'pfr': 0,
+            'three_bet': 0,
+            'four_bet': 0,
+            'af': {'bet': 0, 'raise': 0, 'call': 0},
+            'showdowns': 0,
+            'showdown_wins': 0,
+            'folds': 0,
+            'checks': 0,
+            'total_actions': 0,
+            'bluffs_attempted': 0,
+            'bluffs_successful': 0,
+            'wins_without_showdown': 0,
+            'fold_to_3bet': 0,
+            'face_3bet': 0,
+            'steal_attempts': 0,
+            'steal_opportunities': 0,
+            'cbet_opportunities': 0,
+            'cbet_made': 0,
+            'check_raise_opportunities': 0,
+            'check_raise_made': 0,
+            'all_ins': 0,
+            'total_bet_amount': 0,
+            'street_vpip': {'flop': 0, 'turn': 0, 'river': 0},
+            'street_actions': {'flop': [], 'turn': [], 'river': []},
+            'biggest_win': 0,
+            'biggest_loss': 0,
+            'current_hand_invested': 0,
+        }
+        
+        for name in self.player_names:
+            if name not in self.player_stats:
+                self.player_stats[name] = {}
+            # 补充缺失的字段
+            for key, value in default_stats.items():
+                if key not in self.player_stats[name]:
+                    self.player_stats[name][key] = value
         
         # 恢复游戏引擎
         engine_data = save_data.get('game_engine', {})
