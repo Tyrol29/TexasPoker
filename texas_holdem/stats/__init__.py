@@ -1,8 +1,9 @@
 """
-统计报告模块
-提供玩家数据统计和报告生成功能
+统计模块
+包含玩家统计和报告生成
 """
 
-from .reports import StatsReporter
+from .stats_reporter import StatsReporter
+from .opponent_tracker import OpponentTracker
 
-__all__ = ['StatsReporter']
+__all__ = ['StatsReporter', 'OpponentTracker']

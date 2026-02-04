@@ -17,6 +17,8 @@ from texas_holdem.game.betting import BettingRound
 from texas_holdem.utils.constants import Action, GameState, SMALL_BLIND, BIG_BLIND, INITIAL_CHIPS
 from texas_holdem.utils.save_manager import SaveManager, GameStateEncoder, GameStateDecoder
 from texas_holdem.network import HostServer, GameClient, MessageType, GameMessage
+from texas_holdem.ai import AIEngine, SharkAI
+from texas_holdem.stats import StatsReporter, OpponentTracker
 import os
 import threading
 
@@ -58,9 +60,11 @@ class CLI:
         self.turn_countdown = 15       # 回合倒计时秒数
         self.countdown_active = False  # 倒计时是否进行中
         
-        # 鲨鱼AI对手追踪数据
-        self.shark_opponent_data = {}  # {player_name: {stats}}
-        self.shark_adaptation_active = False  # 是否已激活调整
+        # AI引擎和统计模块
+        self.ai_engine = AIEngine()           # AI决策引擎
+        self.shark_ai = SharkAI()             # 鲨鱼AI实例
+        self.stats_reporter = StatsReporter() # 统计报告生成器
+        self.opponent_tracker = OpponentTracker()  # 对手追踪器
         
         # 打法风格参数配置
         self.style_configs = {
@@ -566,8 +570,8 @@ class CLI:
         # 初始化对手统计数据
         self._initialize_opponent_stats(self.game_engine.players)
         
-        # 初始化鲨鱼AI的对手追踪
-        self._initialize_shark_tracking(self.game_engine.players)
+        # 初始化鲨鱼AI
+        self.shark_ai.initialize_opponents(self.game_engine.players)
         
         # 初始化玩家详细统计
         self._initialize_player_stats()
@@ -1168,117 +1172,24 @@ class CLI:
             # 不摊牌获胜
             stats['wins_without_showdown'] += 1
         
-        # 更新鲨鱼AI的对手追踪数据
-        self._update_shark_tracking(
-            player_name, action, street, 
+        # 每轮行动后都更新鲨鱼AI的对手追踪（确保实时学习）
+        self.shark_ai.update_after_action(
+            player_name, action, street,
             is_bluff=is_bluff,
             facing_cbet=cbet_opportunity
         )
 
     def _print_stats_report(self):
-        """输出详细玩家统计报告 - 包含多项技术指标"""
-        print(f"\n{'='*100}")
-        print(f"[统计报告] 玩家打法分析 (前{self.total_hands}手牌)")
-        print(f"{'='*100}")
+        """输出详细玩家统计报告 - 使用StatsReporter"""
+        report = self.stats_reporter.generate_report(
+            self.player_stats, self.total_hands, self.player_styles
+        )
+        print(report)
         
-        # 风格中文名称
-        style_names = {
-            'TAG': '紧凶',
-            'LAG': '松凶',
-            'LAP': '紧弱',
-            'LP': '松弱'
-        }
-        
-        for name, stats in self.player_stats.items():
-            if stats['hands_played'] == 0:
-                continue
-            
-            hands = self.total_hands
-            vpip_pct = (stats['vpip'] / hands * 100) if hands > 0 else 0
-            pfr_pct = (stats['pfr'] / hands * 100) if hands > 0 else 0
-            three_bet_pct = (stats['three_bet'] / hands * 100) if hands > 0 else 0
-            
-            # AF = (下注+加注) / 跟注
-            aggressive = stats['af']['bet'] + stats['af']['raise']
-            passive = stats['af']['call']
-            af = aggressive / passive if passive > 0 else aggressive
-            
-            # 获取预设风格和实际风格
-            preset_style = self.player_styles.get(name, '-')
-            preset_short = style_names.get(preset_style, preset_style)
-            actual_style_full = self._classify_player_style(vpip_pct, pfr_pct, af)
-            # 提取风格代码（如"TAG(紧凶)" -> "TAG"）
-            actual_style_code = actual_style_full.split('(')[0] if '(' in actual_style_full else actual_style_full
-            actual_short = style_names.get(actual_style_code, actual_style_code)
-            
-            # 分析偏离详情
-            deviation_analysis = self._analyze_style_deviation(preset_style, vpip_pct, pfr_pct, af)
-            
-            # 判断是否符合预设
-            if preset_style == '-' or preset_style == actual_style_code:
-                diff = "符合" if preset_style != '-' else "人类"
-            else:
-                diff = "偏离"
-            
-            display_name = name[:14]
-            
-            # === 基础指标行 ===
-            print(f"\n{display_name:<15} | VPIP:{vpip_pct:5.1f}% | PFR:{pfr_pct:5.1f}% | 3BET:{three_bet_pct:4.1f}% | "
-                  f"AF:{af:4.2f} | 预设:{preset_short:<6} | 实际:{actual_style_full:<10} [{diff}]")
-            
-            # 显示偏离分析
-            if deviation_analysis:
-                print(f"  [偏离分析] {deviation_analysis}")
-            
-            # === 高级指标行1 ===
-            # WTSD% (摊牌率)
-            wtsd_pct = (stats['showdowns'] / stats['hands_played'] * 100) if stats['hands_played'] > 0 else 0
-            # W$SD% (摊牌胜率)
-            wsd_pct = (stats['showdown_wins'] / stats['showdowns'] * 100) if stats['showdowns'] > 0 else 0
-            # 不摊牌胜率
-            wws_pct = (stats['wins_without_showdown'] / (stats['hands_played'] - stats['showdowns']) * 100) \
-                      if (stats['hands_played'] - stats['showdowns']) > 0 else 0
-            # Fold to 3Bet%
-            fold_3bet_pct = (stats['fold_to_3bet'] / stats['face_3bet'] * 100) if stats['face_3bet'] > 0 else 0
-            
-            print(f"  {'─'*95}")
-            print(f"  摊牌率WTSD:{wtsd_pct:4.1f}% | 摊牌胜率W$SD:{wsd_pct:4.1f}% | 不摊牌胜:{wws_pct:4.1f}% | "
-                  f"弃3BET:{fold_3bet_pct:4.1f}% | ALL-IN:{stats['all_ins']}次")
-            
-            # === 高级指标行2 ===
-            # 偷盲率
-            steal_pct = (stats['steal_attempts'] / stats['steal_opportunities'] * 100) \
-                        if stats['steal_opportunities'] > 0 else 0
-            # C-bet率
-            cbet_pct = (stats['cbet_made'] / stats['cbet_opportunities'] * 100) \
-                       if stats['cbet_opportunities'] > 0 else 0
-            # 诈唬成功率
-            bluff_pct = (stats['bluffs_successful'] / stats['bluffs_attempted'] * 100) \
-                        if stats['bluffs_attempted'] > 0 else 0
-            # 平均下注额
-            avg_bet = stats['total_bet_amount'] / (stats['af']['bet'] + stats['af']['raise']) \
-                      if (stats['af']['bet'] + stats['af']['raise']) > 0 else 0
-            
-            print(f"  偷盲率:{steal_pct:4.1f}% | C-BET率:{cbet_pct:4.1f}% | 诈唬成功率:{bluff_pct:4.1f}% | "
-                  f"均注:{avg_bet:5.0f} | 总弃牌:{stats['folds']}次")
-            
-            # === 各街道统计 ===
-            flop_vpip = stats['street_vpip']['flop']
-            turn_vpip = stats['street_vpip']['turn']
-            river_vpip = stats['street_vpip']['river']
-            print(f"  街道入池: 翻牌FLOP:{flop_vpip:3d} | 转牌TURN:{turn_vpip:3d} | 河牌RIVER:{river_vpip:3d}")
-            
-            # 最大盈亏
-            print(f"  最大赢池:{stats['biggest_win']:6d} | 最大损失:{stats['biggest_loss']:6d} | "
-                  f"摊牌次数:{stats['showdowns']:3d}/{stats['hands_played']:3d}")
-        
-        print(f"\n{'='*100}")
-        print("指标说明:")
-        print("  VPIP = 主动入池率 | PFR = 翻牌前加注率 | 3BET = 再加注频率 | AF = 激进因子(下注+加注)/跟注")
-        print("  WTSD = 摊牌率(看对手牌的频率) | W$SD = 摊牌胜率 | 不摊牌胜 = 对手弃牌赢得的底池")
-        print("  弃3BET = 面对再加注的弃牌率 | 偷盲率 = 后位抢盲频率 | C-BET = 持续下注率(翻牌前加注者在翻牌圈下注)")
-        print("  紧凶(TAG): VPIP<25%, AF>2 | 松凶(LAG): VPIP>30%, AF>2 | 紧弱(LAP): VPIP<25%, AF<1.5 | 松弱(LP): VPIP>35%, AF<1.5")
-        print(f"{'='*100}")
+        # 显示鲨鱼AI的对手分析（如果有）
+        if self.shark_ai.adaptation_active:
+            shark_summary = self.shark_ai.get_opponent_summary()
+            print(f"\n{shark_summary}")
 
     def _eliminate_broke_players(self):
         """
@@ -2245,8 +2156,8 @@ class CLI:
 
     def get_ai_action(self, player: Player, betting_round: BettingRound) -> tuple:
         """
-        AI玩家决策
-
+        AI玩家决策 - 使用AI引擎
+        
         Args:
             player: AI玩家
             betting_round: 下注轮次对象
@@ -2254,27 +2165,37 @@ class CLI:
         Returns:
             (行动, 金额) 元组
         """
-        import random
-        from texas_holdem.core.evaluator import PokerEvaluator
-
         game_state = betting_round.game_state
-        available_actions = betting_round.get_available_actions(player)
-        amount_to_call = betting_round.get_amount_to_call(player)
-        current_bet = game_state.current_bet
-
-        # AI决策（简洁显示）
         community_cards = game_state.table.get_community_cards()
-        hand_strength = self._evaluate_hand_strength(player.hand.get_cards(), community_cards)
-        pot_odds = self._calculate_pot_odds(game_state.table.total_pot, amount_to_call)
-        win_probability = self._estimate_win_probability(player.hand.get_cards(), community_cards)
-        ev = self._calculate_expected_value(hand_strength, pot_odds, amount_to_call, game_state.table.total_pot)
-
-        action, amount = self._choose_ai_action(
-            player, available_actions, amount_to_call, current_bet,
-            hand_strength, game_state.state, pot_odds, win_probability, ev, game_state
+        
+        # 计算手牌数据
+        hand_strength = AIEngine.evaluate_hand_strength(
+            player.hand.get_cards(), community_cards
         )
-
-        return action, amount
+        amount_to_call = betting_round.get_amount_to_call(player)
+        pot_odds = AIEngine.calculate_pot_odds(
+            game_state.table.total_pot, amount_to_call
+        )
+        win_probability = AIEngine.estimate_win_probability(
+            player.hand.get_cards(), community_cards
+        )
+        ev = AIEngine.calculate_expected_value(
+            hand_strength, pot_odds, amount_to_call, game_state.table.total_pot
+        )
+        
+        # 鲨鱼AI使用自己的决策逻辑
+        style = getattr(player, 'ai_style', 'LAG')
+        if style == 'SHARK':
+            return self.shark_ai.get_action(
+                player, betting_round, hand_strength,
+                win_probability, pot_odds, ev
+            )
+        
+        # 其他AI使用标准引擎
+        return self.ai_engine.get_action(
+            player, betting_round, hand_strength,
+            win_probability, pot_odds, ev
+        )
 
     def _evaluate_hand_strength(self, hole_cards, community_cards):
         """

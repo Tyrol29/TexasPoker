@@ -1,8 +1,9 @@
 """
-AI策略模块
-提供德州扑克AI的各种决策策略
+AI算法模块
+包含各种AI风格策略和决策逻辑
 """
 
-from .strategy import AIStrategy
+from .ai_engine import AIEngine
+from .shark_ai import SharkAI
 
-__all__ = ['AIStrategy']
+__all__ = ['AIEngine', 'SharkAI']
