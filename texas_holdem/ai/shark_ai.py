@@ -21,16 +21,16 @@ class SharkAI:
     """
     
     def __init__(self):
-        # 基础GTO配置
+        # 初始使用紧弱(LAP)风格，学习后动态调整
         self.base_config = {
-            'vpip_range': (22, 28),
-            'pfr_range': (18, 24),
-            'af_factor': 2.0,
-            'bluff_freq': 0.20,
-            'call_preflop': 0.25,
-            'raise_preflop': 0.28,
-            'bet_postflop': 0.45,
-            'fold_to_raise': 0.45,
+            'vpip_range': (15, 22),      # 紧 - 只玩好牌
+            'pfr_range': (5, 12),        # 弱 - 少加注多跟注
+            'af_factor': 1.0,            # 低攻击性
+            'bluff_freq': 0.05,          # 很少诈唬
+            'call_preflop': 0.40,        # 喜欢跟注
+            'raise_preflop': 0.10,       # 很少加注
+            'bet_postflop': 0.20,        # 翻牌后下注少
+            'fold_to_raise': 0.50,       # 容易被加注吓跑
             'adaptation_start': 20,
             'learning_rate': 0.1,
         }
@@ -190,16 +190,22 @@ class SharkAI:
         config = self.current_config
         is_preflop = (game_state.state == GameState.PRE_FLOP)
         
-        # 翻牌前GTO起手牌选择
+        # 翻牌前紧弱起手牌选择（ tighter than before ）
         if is_preflop:
-            if hand_strength < 0.48:
+            if hand_strength < 0.58:  # 提高门槛，只玩更好的牌
+                # 如果可以免费看牌，优先check
+                if amount_to_call <= 0:
+                    return Action.CHECK, 0
                 if player.is_big_blind and amount_to_call <= 10:
-                    return (Action.CALL if amount_to_call > 0 else Action.CHECK, 0)
+                    return Action.CALL, 0
                 return Action.FOLD, 0
-            # 中等牌力根据位置调整
-            elif hand_strength < 0.58:
+            # 中等牌力（0.58-0.68）根据位置谨慎游戏
+            elif hand_strength < 0.68:
                 is_late = player.is_dealer or player.is_small_blind
-                if not is_late and amount_to_call > 20:
+                # 早位放弃，晚位才玩
+                if not is_late:
+                    if amount_to_call <= 0:
+                        return Action.CHECK, 0
                     return Action.FOLD, 0
         
         # 根据手牌强度和当前配置选择行动
@@ -234,48 +240,55 @@ class SharkAI:
         return action, amount
     
     def _calculate_shark_weights(self, hand_strength: float, config: Dict) -> Dict[str, float]:
-        """计算鲨鱼AI的行动权重"""
+        """计算鲨鱼AI的行动权重 - 紧弱(LAP)风格"""
         weights = {'fold': 0, 'check': 0, 'call': 0, 'bet': 0, 'raise': 0, 'all_in': 0}
         
-        # GTO调整的紧度（稍微紧一点）
-        adjusted = hand_strength - 0.02
+        # 紧弱调整
+        adjusted = hand_strength - 0.05  # 更保守
         
-        bluff_freq = config['bluff_freq']
-        af = config['af_factor']
+        bluff_freq = config['bluff_freq']  # 低诈唬频率 (0.05)
+        af = config['af_factor']  # 低攻击性 (1.0)
         
         if adjusted > 0.75:  # 超强牌
+            # 即使强牌也更喜欢跟注而不是加注
             weights.update({
-                'raise': 0.50,
+                'call': 0.45,
                 'bet': 0.30,
-                'call': 0.20
+                'raise': 0.25,
             })
         elif adjusted > 0.55:  # 强牌
+            # 被动地跟注，少加注
             weights.update({
-                'raise': 0.35,
-                'bet': 0.35,
-                'call': 0.30
+                'call': 0.50,
+                'bet': 0.25,
+                'raise': 0.15,
+                'fold': 0.10,
             })
         elif adjusted > 0.40:  # 中等牌
+            # 更多地跟注看牌，少下注
             weights.update({
-                'raise': 0.20,
-                'bet': 0.30,
-                'call': 0.35,
-                'fold': 0.15
+                'call': 0.55,
+                'check': 0.20,
+                'fold': 0.15,
+                'bet': 0.08,
+                'raise': 0.02,
             })
         elif adjusted > 0.30:  # 中等偏弱
+            # 紧弱风格：能弃就弃，能check就check，很少诈唬
             weights.update({
-                'fold': 0.35,
-                'check': 0.30,
-                'call': 0.20,
-                'bet': 0.10 * bluff_freq * 5,  # 诈唬频率影响
-                'raise': 0.05 * bluff_freq * 5
+                'fold': 0.40,
+                'check': 0.35,
+                'call': 0.22,
+                'bet': 0.02 * bluff_freq * 10,  # 极少诈唬
+                'raise': 0.01 * bluff_freq * 10
             })
         else:  # 弱牌
+            # 紧弱：弃牌或check，基本不诈唬
             weights.update({
-                'fold': 0.50,
+                'fold': 0.60,
                 'check': 0.30,
-                'call': 0.10,
-                'bet': 0.10 * bluff_freq * 3
+                'call': 0.09,
+                'bet': 0.01 * bluff_freq * 10  # 几乎不诈唬
             })
         
         return weights
