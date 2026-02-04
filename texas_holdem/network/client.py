@@ -36,12 +36,27 @@ class GameClient:
         self.my_hand: Optional[list] = None
     
     def connect(self, host: str, port: int = 8888) -> bool:
-        """连接到房主服务器"""
+        """连接到房主服务器（支持IPv4和IPv6）"""
         try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.settimeout(5)  # 连接超时5秒
-            self.socket.connect((host, port))
-            self.socket.settimeout(None)  # 连接成功后取消超时
+            # 解析地址（支持IPv6括号格式）
+            addr_info = socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            
+            # 优先使用IPv6，其次是IPv4
+            for family, socktype, proto, canonname, sockaddr in addr_info:
+                try:
+                    self.socket = socket.socket(family, socktype, proto)
+                    self.socket.settimeout(5)  # 连接超时5秒
+                    self.socket.connect(sockaddr)
+                    self.socket.settimeout(None)  # 连接成功后取消超时
+                    break
+                except socket.error:
+                    if self.socket:
+                        self.socket.close()
+                        self.socket = None
+                    continue
+            
+            if not self.socket:
+                raise Exception("无法连接到服务器")
             
             self.server_addr = (host, port)
             

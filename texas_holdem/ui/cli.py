@@ -1505,34 +1505,48 @@ class CLI:
             except ValueError:
                 print("请输入有效数字")
         
-        # 启动服务器
+        # 启动服务器（优先IPv6）
         print("\n启动服务器...")
-        self.server = HostServer("0.0.0.0", 8888)
+        self.server = HostServer("::", 8888)  # IPv6 any地址，同时支持IPv4
         self.server.on_player_join = self._on_remote_player_join
         self.server.on_player_leave = self._on_remote_player_leave
         self.server.on_action_received = self._on_remote_action_received
         
-        if not self.server.start():
+        if not self.server.start(use_ipv6=True):
             print("启动服务器失败!")
             self.game_mode = "single"
             return
         
-        # 获取本机IP
-        import socket
-        hostname = socket.gethostname()
-        try:
-            local_ip = socket.getaddrinfo(hostname, None, socket.AF_INET)[0][4][0]
-        except:
-            local_ip = "127.0.0.1"
+        # 获取本机IP地址（IPv4和IPv6）
+        ipv4_addr, ipv6_addr = self._get_host_addresses()
         
-        print(f"\n{'='*60}")
+        print(f"\n{'='*70}")
         print("房间已创建!")
-        print(f"{'='*60}")
-        print(f"房间地址: {local_ip}:8888")
+        print(f"{'='*70}")
+        print(f"\n【连接方式选择】")
+        print(f"\n方式1 - 局域网连接（同一WiFi）:")
+        print(f"  IPv4地址: {ipv4_addr}:8888")
+        
+        if ipv6_addr:
+            print(f"\n方式2 - IPv6直连（双方支持IPv6即可，无需同一网络）:")
+            print(f"  IPv6地址: [{ipv6_addr}]:8888")
+            print(f"\n  ⚠️  提示: 双方网络需支持IPv6")
+            print(f"     可通过 https://test-ipv6.com 检测")
+        else:
+            print(f"\n方式2 - IPv6: 本机不支持IPv6")
+        
+        print(f"\n方式3 - 内网穿透（不同网络且不支持IPv6时）:")
+        print(f"  使用 ngrok: ngrok tcp 8888")
+        print(f"  或使用花生壳等工具")
+        
+        print(f"\n{'='*70}")
         print(f"房主: {host_name}")
-        print(f"\n等待其他玩家加入...")
-        print("输入 'start' 开始游戏，输入 'exit' 取消")
-        print(f"{'='*60}")
+        print(f"AI玩家: {ai_count}人")
+        print(f"\n请将上述地址分享给朋友！")
+        print(f"\n输入 'start' 开始游戏")
+        print(f"输入 'list' 查看已加入玩家")
+        print(f"输入 'exit' 取消")
+        print(f"{'='*70}")
         
         # 等待开始
         remote_players = []
@@ -1571,9 +1585,9 @@ class CLI:
 
     def join_room_menu(self):
         """加入房间菜单"""
-        print("\n" + "=" * 60)
+        print("\n" + "=" * 70)
         print("加入房间 - 联机对战")
-        print("=" * 60)
+        print("=" * 70)
         
         # 输入名称
         while True:
@@ -1583,9 +1597,20 @@ class CLI:
             print("名称不能为空")
         
         # 输入房间地址
-        host_ip = input("输入房间IP地址 (默认127.0.0.1): ").strip()
+        print("\n【输入房间地址】")
+        print("支持格式:")
+        print("  IPv4: 192.168.1.5")
+        print("  IPv6: 2408:8207:1234::1 (无需括号)")
+        print("  域名: xxx.ngrok.io")
+        
+        host_ip = input("\n输入房间地址 (默认127.0.0.1): ").strip()
         if not host_ip:
             host_ip = "127.0.0.1"
+        
+        # 处理IPv6地址格式
+        if ':' in host_ip and not host_ip.startswith('['):
+            # 纯IPv6地址，自动添加括号
+            host_ip = f"[{host_ip}]"
         
         self.my_player_name = player_name
         self.game_mode = "client"
@@ -1623,6 +1648,56 @@ class CLI:
         self._run_client_game()
 
     # 联机模式回调函数
+    def _get_host_addresses(self):
+        """获取本机IPv4和IPv6地址"""
+        import socket
+        
+        ipv4_addr = "127.0.0.1"
+        ipv6_addr = None
+        
+        try:
+            # 获取主机名
+            hostname = socket.gethostname()
+            
+            # 获取所有地址信息
+            addr_info = socket.getaddrinfo(hostname, None)
+            
+            for info in addr_info:
+                family, _, _, _, sockaddr = info
+                ip = sockaddr[0]
+                
+                # 跳过本地地址
+                if ip.startswith('127.') or ip == '::1':
+                    continue
+                
+                if family == socket.AF_INET and ipv4_addr == "127.0.0.1":
+                    # IPv4地址
+                    ipv4_addr = ip
+                elif family == socket.AF_INET6 and not ipv6_addr:
+                    # IPv6地址（排除fe80开头的链路本地地址）
+                    if not ip.startswith('fe80'):
+                        # 移除可能的%后缀（zone index）
+                        if '%' in ip:
+                            ip = ip.split('%')[0]
+                        ipv6_addr = ip
+            
+            # 如果通过主机名没获取到，尝试其他方式
+            if ipv4_addr == "127.0.0.1":
+                try:
+                    # 连接外部服务器来检测本机IP
+                    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    s.settimeout(2)
+                    s.connect(('8.8.8.8', 80))
+                    ipv4_addr = s.getsockname()[0]
+                    s.close()
+                except:
+                    pass
+            
+        except Exception as e:
+            print(f"获取地址失败: {e}")
+        
+        return ipv4_addr, ipv6_addr
+
     def _on_remote_player_join(self, player_name):
         """远程玩家加入回调"""
         print(f"\n[系统] 玩家 {player_name} 加入了房间")

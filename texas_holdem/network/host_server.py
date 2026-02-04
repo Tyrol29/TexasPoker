@@ -72,10 +72,17 @@ class HostServer:
         self.timer_thread: Optional[threading.Thread] = None
         self.timer_running = False
     
-    def start(self) -> bool:
+    def start(self, use_ipv6: bool = True) -> bool:
         """启动服务器"""
         try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # 支持IPv6
+            if use_ipv6:
+                self.socket = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+                # 允许IPv4映射到IPv6（双栈支持）
+                self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            else:
+                self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.socket.bind((self.host, self.port))
             self.socket.listen(self.max_players)
