@@ -90,15 +90,79 @@ class CLI:
     def display_welcome(self):
         """显示欢迎信息"""
         print("=" * 60)
-        print("          德州扑克两人对战游戏")
+        print("          德州扑克对战游戏")
         print("=" * 60)
-        print("\n规则:")
-        print("  • 两人对战德州扑克")
-        print(f"  • 初始筹码: {INITIAL_CHIPS}")
-        print(f"  • 小盲注: {SMALL_BLIND}, 大盲注: {BIG_BLIND}")
-        print("  • 游戏包含四个下注轮次: 翻牌前、翻牌、转牌、河牌")
-        print("  • 支持行动: 弃牌、过牌、跟注、下注、加注、全押")
+        print("\n游戏设置:")
+        print("  - 支持 2-8 人对战 (人机混合)")
+        print(f"  - 初始筹码: {INITIAL_CHIPS}")
+        print(f"  - 小盲注: {SMALL_BLIND}, 大盲注: {BIG_BLIND}")
+        print("  - 游戏包含四个下注轮次: 翻牌前、翻牌、转牌、河牌")
+        print("  - 支持行动: 弃牌、过牌、跟注、下注、加注、全押")
+        
+        # 在不支持颜色的环境中显示花色说明
+        if not self._supports_color():
+            print("\n" + "-" * 60)
+            print("花色说明 (无颜色模式):")
+            print("  H = 红桃 (Hearts)    D = 方块 (Diamonds)")
+            print("  C = 梅花 (Clubs)     S = 黑桃 (Spades)")
+            print("  示例: AH = 红桃A     10D = 方块10")
+            print("-" * 60)
+        else:
+            # 支持颜色时显示彩色示例
+            print("\n" + "-" * 60)
+            print("花色颜色说明:")
+            print(f"  {self._color_card('A', 'H')} = 红桃A   "
+                  f"{self._color_card('A', 'D')} = 方块A")
+            print(f"  {self._color_card('K', 'C')} = 梅花K   "
+                  f"{self._color_card('K', 'S')} = 黑桃K")
+            print("-" * 60)
+        
         print("\n" + "=" * 60)
+
+    def _supports_color(self):
+        """检测当前环境是否支持 ANSI 颜色"""
+        import sys
+        import os
+        
+        if os.environ.get('NO_COLOR'):
+            return False
+        if os.environ.get('FORCE_COLOR'):
+            return True
+        
+        if sys.platform == 'win32':
+            try:
+                import ctypes
+                from ctypes import wintypes
+                
+                kernel32 = ctypes.windll.kernel32
+                STD_OUTPUT_HANDLE = -11
+                ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+                
+                handle = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+                if handle == -1:
+                    return False
+                    
+                mode = wintypes.DWORD()
+                if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                    return bool(mode.value & ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+            except:
+                pass
+            return False
+        
+        return hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
+    
+    def _color_card(self, rank, suit):
+        """返回带颜色的牌字符串（用于显示示例）"""
+        colors = {
+            'H': '\033[91m',  # 红色
+            'D': '\033[93m',  # 黄色
+            'C': '\033[92m',  # 绿色
+            'S': '\033[96m',  # 青色
+            'reset': '\033[0m'
+        }
+        color = colors.get(suit, '')
+        reset = colors['reset'] if color else ''
+        return f"{color}{rank}{suit}{reset}"
 
     def get_player_names(self) -> List[str]:
         """获取玩家名称 - 支持2-8人游戏"""
@@ -235,15 +299,15 @@ class CLI:
         
         # 阶段名称映射
         stage_names = {
-            GameState.PRE_FLOP: "🂠 翻牌前",
-            GameState.FLOP: "🂡 翻牌圈",
-            GameState.TURN: "🂢 转牌圈", 
-            GameState.RIVER: "🂣 河牌圈",
+            GameState.PRE_FLOP: "[翻牌前]",
+            GameState.FLOP: "[翻牌圈]",
+            GameState.TURN: "[转牌圈]", 
+            GameState.RIVER: "[河牌圈]",
             GameState.SHOWDOWN: "[摊牌]"
         }
         stage = stage_names.get(game_state.state, game_state.state)
         
-        print(f"\n【{stage}】 底池: 💰{table.total_pot}")
+        print(f"\n【{stage}】 底池: ${table.total_pot}")
         
         # 显示公共牌
         community_cards = table.get_community_cards()
@@ -258,7 +322,7 @@ class CLI:
             # 状态标记
             status_marks = []
             if not player.is_active:
-                status_marks.append("✕")
+                status_marks.append("X")
             if player.is_all_in:
                 status_marks.append("ALL")
             
@@ -276,7 +340,7 @@ class CLI:
                 if (player.is_active and not player.is_ai) or game_state.state == GameState.SHOWDOWN or show_all_hands:
                     hand_str = f" {player.hand}"
                 else:
-                    hand_str = " 🂠🂠"
+                    hand_str = " [?][?]"
             
             # 当前下注
             bet_str = f" 注:{player.bet_amount}" if player.bet_amount > 0 else ""
@@ -408,7 +472,7 @@ class CLI:
         if len(winners) == 1:
             print(f"\n*** {winners[0].name} 获胜! ***")
         else:
-            print(f"\n🤝 平局! 赢家: {', '.join(w.name for w in winners)}")
+            print(f"\n[平局] 赢家: {', '.join(w.name for w in winners)}")
 
         for player, amount in winnings.items():
             print(f"{player.name} 赢得 {amount} 筹码")
@@ -1964,7 +2028,10 @@ class CLI:
                 if player.is_big_blind and amount_to_call <= 10:
                     # 大盲注位置，没人加注，可以免费看牌时：应该看牌，不弃牌！
                     # 已经投入大盲注，弃牌就是白白损失
-                    return 'call', 0  # call 0 = check，免费看牌
+                    if amount_to_call > 0:
+                        return 'call', 0  # 需要跟注
+                    else:
+                        return 'check', 0  # 免费看牌
                 else:
                     # 其他位置需要跟注才能继续，直接弃牌
                     return 'fold', 0
@@ -1975,11 +2042,16 @@ class CLI:
             if hand_strength < 0.35:
                 if player.is_big_blind and amount_to_call <= 10:
                     # 大盲注可以免费看牌时，总是看牌不弃牌
-                    return 'call', 0
+                    if amount_to_call > 0:
+                        return 'call', 0  # 需要跟注
+                    else:
+                        return 'check', 0  # 免费看牌
                 if random.random() < 0.75:  # 75%弃牌其他弱牌
                     return 'fold', 0
-                else:
+                elif amount_to_call > 0:
                     return 'call', 0
+                else:
+                    return 'check', 0
 
         # 基础行动权重
         action_weights = {
@@ -2232,44 +2304,25 @@ class CLI:
         for action in list(action_weights.keys()):
             if action not in available_actions:
                 action_weights[action] = 0
-
-        # 12. 关键规则：如果有过牌选项，根据牌力和位置决定是否下注
-        # 翻牌后、转牌、河牌都可以主动下注（价值或诈唬）
+        
+        # 11.5 关键修复：当可以过牌时（没人下注），绝不应该弃牌
+        # 在转牌或河牌后，前置位玩家有过牌选项时，弃牌是错误决策
         if 'check' in available_actions:
-            import random
-            
-            # 可以下注时的决策
-            if 'bet' in available_actions:
-                # 根据手牌强度决定是否下注
-                if hand_strength > 0.6:  # 强牌 - 价值下注
-                    if random.random() < 0.7:  # 70%概率下注
-                        amount = self._calculate_bet_amount(
-                            'bet', player, current_bet, amount_to_call,
-                            hand_strength, win_probability, pot_odds, game_state, game_state_manager
-                        )
-                        return 'bet', amount
-                    return 'check', 0
-                    
-                elif hand_strength > 0.4:  # 中等牌 - 小额试探或 check
-                    if random.random() < 0.3:  # 30%概率下注
-                        amount = self._calculate_bet_amount(
-                            'bet', player, current_bet, amount_to_call,
-                            hand_strength, win_probability, pot_odds, game_state, game_state_manager
-                        )
-                        return 'bet', amount
-                    return 'check', 0
-                    
-                else:  # 弱牌 - 偶尔诈唬
-                    if random.random() < 0.25:  # 25%概率诈唬
-                        amount = self._calculate_bet_amount(
-                            'bet', player, current_bet, amount_to_call,
-                            hand_strength, win_probability, pot_odds, game_state, game_state_manager
-                        )
-                        return 'bet', amount
-                    return 'check', 0
-            else:
-                # 不能下注时，永远过牌
-                return 'check', 0
+            action_weights['fold'] = 0
+
+        # 12. 当可以过牌时，增加基于牌力的基础权重
+        # 让权重随机选择路径决定行动，而非固定概率
+        if 'check' in available_actions and 'bet' in available_actions:
+            # 根据手牌强度增加下注权重（作为基础，不影响诈唬权重）
+            if hand_strength > 0.6:  # 强牌 - 高价值下注权重
+                action_weights['bet'] = min(1.0, action_weights['bet'] + 0.50)
+                action_weights['check'] = max(0, action_weights.get('check', 0) + 0.30)
+            elif hand_strength > 0.4:  # 中等牌 - 适度下注权重
+                action_weights['bet'] = min(1.0, action_weights['bet'] + 0.15)
+                action_weights['check'] = max(0, action_weights.get('check', 0) + 0.45)
+            else:  # 弱牌 - 低下注权重（依赖诈唬权重）
+                action_weights['check'] = max(0, action_weights.get('check', 0) + 0.55)
+                # 弱牌时如果有诈唬权重已经添加，这里不再额外增加
 
         # 13. 归一化权重
         total_weight = sum(action_weights.values())
@@ -2295,7 +2348,7 @@ class CLI:
                 )
                 # 修复：如果加注金额计算为0或小于最小加注额，改为跟注
                 if action == 'raise' and amount <= 0:
-                    if 'call' in available_actions:
+                    if amount_to_call > 0 and 'call' in available_actions:
                         return 'call', 0
                     else:
                         return 'check', 0

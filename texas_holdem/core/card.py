@@ -3,6 +3,48 @@
 表示一张标准的扑克牌，包含花色和牌面值
 """
 
+import sys
+import os
+
+
+def _supports_ansi():
+    """检测当前环境是否支持 ANSI 颜色代码"""
+    # 如果显式设置了 NO_COLOR，则禁用颜色
+    if os.environ.get('NO_COLOR'):
+        return False
+    
+    # 如果显式设置了 FORCE_COLOR，则启用颜色
+    if os.environ.get('FORCE_COLOR'):
+        return True
+    
+    # Windows 平台检测
+    if sys.platform == 'win32':
+        # 检测是否在支持 ANSI 的终端中（Windows 10+）
+        try:
+            import ctypes
+            from ctypes import wintypes
+            
+            kernel32 = ctypes.windll.kernel32
+            STD_OUTPUT_HANDLE = -11
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+            
+            handle = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+            if handle == -1:
+                return False
+                
+            mode = wintypes.DWORD()
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                return bool(mode.value & ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+        except:
+            pass
+        
+        # 在旧版 Windows 或某些终端中不支持
+        return False
+    
+    # Unix/Linux/Mac 通常支持 ANSI
+    return hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
+
+
 class Card:
     # 花色映射（使用ASCII字符避免编码问题）
     SUITS = {
@@ -18,6 +60,14 @@ class Card:
         'D': '♦',  # 方块
         'C': '♣',  # 梅花
         'S': '♠'   # 黑桃
+    }
+    
+    # 备用 ASCII 符号（当 Unicode 不支持时使用）
+    SUIT_ASCII = {
+        'H': 'H',  # 红桃
+        'D': 'D',  # 方块
+        'C': 'C',  # 梅花
+        'S': 'S'   # 黑桃
     }
 
     # ANSI 颜色代码 - 四种花色四种颜色
@@ -69,18 +119,27 @@ class Card:
     def __repr__(self):
         return f"Card('{self.suit}', '{self.rank}')"
 
-    def __str__(self, use_symbols=False, use_color=True):
+    def __str__(self):
         """
         返回扑克牌的字符串表示
-        
-        Args:
-            use_symbols: 是否使用Unicode花色符号（♥♦♣♠）
-            use_color: 是否使用颜色（红桃方块=红色，黑桃梅花=白色）
+        自动检测环境支持情况，选择合适的显示方式
         """
+        # 检测是否支持 ANSI 颜色
+        use_color = _supports_ansi()
+        
+        # 检测是否支持 Unicode（简单检测：尝试编码）
+        try:
+            '♥'.encode(sys.stdout.encoding or 'utf-8')
+            use_symbols = True
+        except (UnicodeEncodeError, AttributeError):
+            use_symbols = False
+        
+        # 选择花色表示方式
         if use_symbols:
             suit_symbol = self.SUIT_SYMBOLS[self.suit]
         else:
-            suit_symbol = self.SUITS[self.suit]
+            suit_symbol = self.SUIT_ASCII[self.suit]
+        
         rank_str = self.rank if len(self.rank) <= 2 else self.rank
         
         if use_color:
