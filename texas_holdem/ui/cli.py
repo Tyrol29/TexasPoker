@@ -16,6 +16,7 @@ from texas_holdem.game.game_engine import GameEngine
 from texas_holdem.game.betting import BettingRound
 from texas_holdem.utils.constants import Action, GameState, SMALL_BLIND, BIG_BLIND, INITIAL_CHIPS
 from texas_holdem.utils.save_manager import SaveManager, GameStateEncoder, GameStateDecoder
+import os
 
 class CLI:
     """命令行界面类"""
@@ -394,7 +395,7 @@ class CLI:
         print(f"\n可用行动: {', '.join(available_actions)}")
 
         while True:
-            action_input = input("请选择行动 (输入 'save' 保存游戏): ").strip().lower()
+            action_input = input("请选择行动: ").strip().lower()
 
             if not action_input:
                 print("请输入行动")
@@ -690,6 +691,16 @@ class CLI:
             active_players = [p for p in game_state.players if p.chips > 0]
             if len(active_players) < 2:
                 break
+            
+            # 每手牌结束后自动保存
+            print("\n" + "-" * 40)
+            if self.autosave_game():
+                print("[系统] 游戏状态已自动保存")
+            else:
+                print("[系统] 自动保存失败")
+
+        # 游戏正常结束，删除自动存档
+        SaveManager.delete_autosave()
 
         # 显示最终结果
         print(f"\n{'='*50}")
@@ -1374,8 +1385,35 @@ class CLI:
         # 首次启动显示欢迎信息
         self.display_welcome()
         
+        # 检查是否有自动存档并询问是否恢复
+        if SaveManager.has_autosave():
+            save_time = SaveManager.get_autosave_info()
+            print(f"\n{'='*60}")
+            print("发现未完成的游戏存档")
+            print(f"{'='*60}")
+            print(f"上次游戏时间: {save_time}")
+            print("-" * 60)
+            
+            while True:
+                choice = input("是否恢复上次游戏? (y/n): ").strip().lower()
+                if choice in ['y', 'yes', '是']:
+                    if self.load_autosave():
+                        print(f"\n游戏恢复成功!")
+                        self._continue_game_loop()
+                        break
+                    else:
+                        print("\n恢复游戏失败，请开始新游戏。")
+                        break
+                elif choice in ['n', 'no', '否']:
+                    print("\n已放弃恢复，开始新游戏。")
+                    # 删除旧存档
+                    SaveManager.delete_autosave()
+                    break
+                else:
+                    print("请输入 y 或 n")
+        
         while True:
-            # 检查是否有存档
+            # 检查是否有存档（手动存档，用于兼容旧功能）
             has_saves = SaveManager.list_saves()
             
             print("\n" + "=" * 60)
@@ -1488,6 +1526,38 @@ class CLI:
                 return True
         return False
     
+    def autosave_game(self) -> bool:
+        """
+        自动保存当前游戏状态（单存档模式）
+        
+        Returns:
+            是否保存成功
+        """
+        if not self.game_engine:
+            return False
+        
+        try:
+            # 构建存档数据
+            save_data = {
+                'version': '1.2.0',
+                'player_names': self.player_names,
+                'player_stats': self.player_stats,
+                'total_hands': self.total_hands,
+                'player_styles': self.player_styles,
+                'initial_ai_count': self.initial_ai_count,
+                'blind_level': self.blind_level,
+                'blind_doubled': self.blind_doubled,
+                'game_engine': GameStateEncoder.encode_game_engine(
+                    self.game_engine, 
+                    is_mid_hand=self._is_mid_hand()
+                )
+            }
+            
+            return SaveManager.save_auto(save_data)
+        except Exception as e:
+            print(f"自动保存失败: {e}")
+            return False
+    
     def load_game_menu(self):
         """显示加载游戏菜单"""
         print("\n" + "=" * 60)
@@ -1537,63 +1607,98 @@ class CLI:
                 print(f"存档{slot}不存在!")
                 return False
             
-            # 恢复 CLI 状态
-            self.player_names = save_data.get('player_names', [])
-            self.player_stats = save_data.get('player_stats', {})
-            self.total_hands = save_data.get('total_hands', 0)
-            self.player_styles = save_data.get('player_styles', {})
-            self.initial_ai_count = save_data.get('initial_ai_count', 0)
-            self.blind_level = save_data.get('blind_level', 1)
-            self.blind_doubled = save_data.get('blind_doubled', False)
-            
-            # 恢复游戏引擎
-            engine_data = save_data.get('game_engine', {})
-            players_data = engine_data.get('players', [])
-            
-            # 重建玩家列表
-            from ..core.player import Player
-            players = []
-            for p_data in players_data:
-                player = GameStateDecoder.decode_player(p_data)
-                players.append(player)
-            
-            # 重建游戏引擎
-            from ..game.game_engine import GameEngine
-            from ..utils import constants as _constants
-            
-            # 设置盲注级别
-            if self.blind_level > 1:
-                _constants.SMALL_BLIND = 10 * (2 ** (self.blind_level - 1))
-                _constants.BIG_BLIND = 20 * (2 ** (self.blind_level - 1))
-            
-            self.game_engine = GameEngine([p.name for p in players], players[0].chips if players else 4000)
-            self.game_engine.players = players
-            
-            # 恢复游戏状态
-            game_state_data = engine_data.get('game_state', {})
-            self.game_engine.game_state = GameStateDecoder.decode_game_state(game_state_data, players)
-            
-            # 初始化其他组件
-            from ..game.betting import BettingRound
-            self.game_engine.betting_round = BettingRound(self.game_engine.game_state)
-            self.game_engine.deck.reset()
-            
-            # 恢复 AI 风格和统计
-            for player in self.game_engine.players:
-                if player.is_ai and player.name in self.player_styles:
-                    player.ai_style = self.player_styles[player.name]
-            
-            self._initialize_opponent_stats(self.game_engine.players)
-            
-            return True
+            return self._restore_game_from_data(save_data)
         except Exception as e:
             print(f"加载失败: {e}")
             import traceback
             traceback.print_exc()
             return False
     
+    def load_autosave(self) -> bool:
+        """
+        加载自动保存的游戏状态
+        
+        Returns:
+            是否加载成功
+        """
+        try:
+            save_data = SaveManager.load_auto()
+            if not save_data:
+                print("自动存档不存在!")
+                return False
+            
+            return self._restore_game_from_data(save_data)
+        except Exception as e:
+            print(f"加载自动存档失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def _restore_game_from_data(self, save_data: dict) -> bool:
+        """
+        从存档数据恢复游戏状态（内部方法）
+        
+        Args:
+            save_data: 存档数据字典
+        
+        Returns:
+            是否恢复成功
+        """
+        from ..utils import constants as _constants
+        
+        # 恢复 CLI 状态
+        self.player_names = save_data.get('player_names', [])
+        self.player_stats = save_data.get('player_stats', {})
+        self.total_hands = save_data.get('total_hands', 0)
+        self.player_styles = save_data.get('player_styles', {})
+        self.initial_ai_count = save_data.get('initial_ai_count', 0)
+        self.blind_level = save_data.get('blind_level', 1)
+        self.blind_doubled = save_data.get('blind_doubled', False)
+        
+        # 恢复游戏引擎
+        engine_data = save_data.get('game_engine', {})
+        players_data = engine_data.get('players', [])
+        
+        # 重建玩家列表
+        from ..core.player import Player
+        players = []
+        for p_data in players_data:
+            player = GameStateDecoder.decode_player(p_data)
+            players.append(player)
+        
+        # 重建游戏引擎
+        from ..game.game_engine import GameEngine
+        
+        # 设置盲注级别
+        if self.blind_level > 1:
+            _constants.SMALL_BLIND = 10 * (2 ** (self.blind_level - 1))
+            _constants.BIG_BLIND = 20 * (2 ** (self.blind_level - 1))
+        
+        self.game_engine = GameEngine([p.name for p in players], players[0].chips if players else 4000)
+        self.game_engine.players = players
+        
+        # 恢复游戏状态
+        game_state_data = engine_data.get('game_state', {})
+        self.game_engine.game_state = GameStateDecoder.decode_game_state(game_state_data, players)
+        
+        # 初始化其他组件
+        from ..game.betting import BettingRound
+        self.game_engine.betting_round = BettingRound(self.game_engine.game_state)
+        self.game_engine.deck.reset()
+        
+        # 恢复 AI 风格和统计
+        for player in self.game_engine.players:
+            if player.is_ai and player.name in self.player_styles:
+                player.ai_style = self.player_styles[player.name]
+        
+        self._initialize_opponent_stats(self.game_engine.players)
+        
+        return True
+    
     def _continue_game_loop(self):
         """继续已加载的游戏"""
+        from ..utils import constants as _constants
+        
         if not self.game_engine:
             print("没有加载的游戏!")
             return
@@ -1616,6 +1721,10 @@ class CLI:
             if choice == 'n':
                 # 结束当前手牌，开始新手牌
                 self._cleanup_current_hand()
+        
+        # 调整 hand_number：因为 _run_game_loop 会增加它，而 reset_for_new_hand 也会
+        # 这里减 1 以确保最终手牌号正确
+        game_state.hand_number -= 1
         
         # 进入游戏主循环
         self._run_game_loop()
@@ -1660,9 +1769,6 @@ class CLI:
                     self.player_stats[player.name]['hands_played'] += 1
             
             self.display_table(game_state)
-            
-            # 添加保存选项提示
-            print("\n[提示] 游戏中可随时输入 'save' 保存游戏")
             
             # 翻牌前下注
             if not self._run_betting_round_interactive():
@@ -1757,11 +1863,15 @@ class CLI:
             if len(active_players) < 2:
                 break
             
-            # 每手牌结束后询问是否保存
+            # 每手牌结束后自动保存
             print("\n" + "-" * 40)
-            save_choice = input("本手牌结束。是否保存游戏? (y/n): ").strip().lower()
-            if save_choice == 'y':
-                self.save_game_menu()
+            if self.autosave_game():
+                print("[系统] 游戏状态已自动保存")
+            else:
+                print("[系统] 自动保存失败")
+        
+        # 游戏正常结束，删除自动存档
+        SaveManager.delete_autosave()
         
         # 显示最终结果
         print(f"\n{'='*50}")

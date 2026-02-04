@@ -19,7 +19,20 @@ def main():
     for dir_name in dirs_to_clean:
         if os.path.exists(dir_name):
             print(f"清理 {dir_name}/ 目录...")
-            shutil.rmtree(dir_name)
+            try:
+                shutil.rmtree(dir_name)
+            except PermissionError:
+                print(f"  警告: 无法清理 {dir_name}/，可能正在被使用")
+                # 如果 dist 存在但无法删除，尝试重命名旧 exe
+                if dir_name == 'dist':
+                    exe_path = os.path.join(dir_name, '德州扑克.exe')
+                    if os.path.exists(exe_path):
+                        backup_path = exe_path + '.old'
+                        try:
+                            os.replace(exe_path, backup_path)
+                            print(f"  已重命名旧 exe 为 {backup_path}")
+                        except:
+                            pass
     
     # 清理旧的spec文件
     for f in os.listdir('.'):

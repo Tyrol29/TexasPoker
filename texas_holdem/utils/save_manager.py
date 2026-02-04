@@ -6,6 +6,7 @@
 import json
 import os
 import pickle
+import sys
 from typing import Dict, Any, Optional
 from datetime import datetime
 
@@ -14,12 +15,28 @@ class SaveManager:
     """游戏存档管理器"""
     
     SAVE_DIR = "saves"
+    AUTOSAVE_FILE = "autosave.json"
+    
+    @classmethod
+    def _get_base_dir(cls) -> str:
+        """获取程序运行目录（支持打包后的exe）"""
+        # 如果是打包后的exe，使用exe所在目录
+        if getattr(sys, 'frozen', False):
+            return os.path.dirname(sys.executable)
+        # 否则使用当前工作目录
+        return os.getcwd()
+    
+    @classmethod
+    def _get_save_dir(cls) -> str:
+        """获取存档目录完整路径"""
+        return os.path.join(cls._get_base_dir(), cls.SAVE_DIR)
     
     @classmethod
     def ensure_save_dir(cls):
         """确保存档目录存在"""
-        if not os.path.exists(cls.SAVE_DIR):
-            os.makedirs(cls.SAVE_DIR)
+        save_dir = cls._get_save_dir()
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
     
     @classmethod
     def save_game(cls, save_data: Dict[str, Any], slot: int = 1) -> bool:
@@ -37,7 +54,7 @@ class SaveManager:
             cls.ensure_save_dir()
             
             filename = f"save_{slot}.json"
-            filepath = os.path.join(cls.SAVE_DIR, filename)
+            filepath = os.path.join(cls._get_save_dir(), filename)
             
             # 添加保存时间戳
             save_data['save_time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -63,7 +80,7 @@ class SaveManager:
         """
         try:
             filename = f"save_{slot}.json"
-            filepath = os.path.join(cls.SAVE_DIR, filename)
+            filepath = os.path.join(cls._get_save_dir(), filename)
             
             if not os.path.exists(filepath):
                 return None
@@ -78,7 +95,7 @@ class SaveManager:
     def has_save(cls, slot: int = 1) -> bool:
         """检查指定槽位是否有存档"""
         filename = f"save_{slot}.json"
-        filepath = os.path.join(cls.SAVE_DIR, filename)
+        filepath = os.path.join(cls._get_save_dir(), filename)
         return os.path.exists(filepath)
     
     @classmethod
@@ -104,7 +121,111 @@ class SaveManager:
         """删除指定存档"""
         try:
             filename = f"save_{slot}.json"
-            filepath = os.path.join(cls.SAVE_DIR, filename)
+            filepath = os.path.join(cls._get_save_dir(), filename)
+            if os.path.exists(filepath):
+                os.remove(filepath)
+                return True
+            return False
+        except Exception:
+            return False
+    
+    # ========== 自动保存功能 ==========
+    
+    @classmethod
+    def save_auto(cls, save_data: Dict[str, Any]) -> bool:
+        """
+        自动保存游戏状态（单存档模式）
+        
+        Args:
+            save_data: 要保存的游戏数据字典
+        
+        Returns:
+            是否保存成功
+        """
+        try:
+            save_dir = cls._get_save_dir()
+            cls.ensure_save_dir()
+            filepath = os.path.join(save_dir, cls.AUTOSAVE_FILE)
+            temp_filepath = filepath + '.tmp'
+            
+            # 添加保存时间戳
+            save_data['save_time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            save_data['is_autosave'] = True
+            
+            # 先写入临时文件，避免写入过程中程序崩溃导致存档损坏
+            with open(temp_filepath, 'w', encoding='utf-8') as f:
+                json.dump(save_data, f, ensure_ascii=False, indent=2)
+            
+            # 写入成功后重命名
+            if os.path.exists(filepath):
+                os.replace(temp_filepath, filepath)
+            else:
+                os.rename(temp_filepath, filepath)
+            
+            return True
+        except Exception as e:
+            print(f"自动保存游戏失败: {e}")
+            # 清理临时文件
+            try:
+                if os.path.exists(temp_filepath):
+                    os.remove(temp_filepath)
+            except:
+                pass
+            return False
+    
+    @classmethod
+    def load_auto(cls) -> Optional[Dict[str, Any]]:
+        """
+        加载自动保存的游戏状态
+        
+        Returns:
+            游戏数据字典，如果没有自动存档则返回 None
+        """
+        filepath = os.path.join(cls._get_save_dir(), cls.AUTOSAVE_FILE)
+        
+        if not os.path.exists(filepath):
+            return None
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+                if not content.strip():
+                    print("[系统] 存档文件为空")
+                    return None
+                return json.loads(content)
+        except json.JSONDecodeError as e:
+            print(f"[系统] 存档文件损坏: {e}")
+            # 备份损坏的存档
+            try:
+                backup_path = filepath + '.corrupted'
+                os.replace(filepath, backup_path)
+                print(f"[系统] 已备份损坏的存档到: {backup_path}")
+            except:
+                pass
+            return None
+        except Exception as e:
+            print(f"[系统] 加载自动存档失败: {e}")
+            return None
+    
+    @classmethod
+    def has_autosave(cls) -> bool:
+        """检查是否有自动存档"""
+        filepath = os.path.join(cls._get_save_dir(), cls.AUTOSAVE_FILE)
+        return os.path.exists(filepath)
+    
+    @classmethod
+    def get_autosave_info(cls) -> Optional[str]:
+        """获取自动存档信息（时间戳）"""
+        data = cls.load_auto()
+        if data:
+            return data.get('save_time', '未知时间')
+        return None
+    
+    @classmethod
+    def delete_autosave(cls) -> bool:
+        """删除自动存档（游戏正常结束时调用）"""
+        try:
+            filepath = os.path.join(cls._get_save_dir(), cls.AUTOSAVE_FILE)
             if os.path.exists(filepath):
                 os.remove(filepath)
                 return True
@@ -153,15 +274,39 @@ class GameStateEncoder:
     @staticmethod
     def encode_table(table) -> Dict[str, Any]:
         """编码牌桌"""
+        # 编码边池列表，将SidePot对象转换为字典
+        # eligible_players 存储的是 Player 对象，需要转换为玩家名称
+        side_pots_data = []
+        for pot in table.side_pots:
+            if hasattr(pot, 'amount'):
+                # 将 Player 对象转换为玩家名称
+                eligible_names = []
+                for p in pot.eligible_players:
+                    if hasattr(p, 'name'):
+                        eligible_names.append(p.name)
+                    elif isinstance(p, str):
+                        eligible_names.append(p)
+                
+                pot_data = {
+                    'amount': pot.amount,
+                    'eligible_players': eligible_names,
+                    'max_contribution': getattr(pot, 'max_contribution', 0)
+                }
+                side_pots_data.append(pot_data)
+        
         return {
             'community_cards': [GameStateEncoder.encode_card(c) for c in table.get_community_cards()],
             'total_pot': table.total_pot,
-            'side_pots': table.side_pots
+            'side_pots': side_pots_data
         }
     
     @staticmethod
     def encode_game_state(game_state) -> Dict[str, Any]:
         """编码游戏状态"""
+        # active_players 和 winners 是 Player 对象列表，需要转换为玩家名称列表
+        active_player_names = [p.name for p in game_state.active_players]
+        winner_names = [p.name for p in game_state.winners]
+        
         return {
             'state': game_state.state,
             'current_player_index': game_state.current_player_index,
@@ -169,7 +314,9 @@ class GameStateEncoder:
             'last_raiser_index': game_state.last_raiser_index,
             'min_raise': game_state.min_raise,
             'hand_number': game_state.hand_number,
-            'table': GameStateEncoder.encode_table(game_state.table)
+            'table': GameStateEncoder.encode_table(game_state.table),
+            'active_player_names': active_player_names,
+            'winner_names': winner_names
         }
     
     @staticmethod
@@ -229,11 +376,23 @@ class GameStateDecoder:
     @staticmethod
     def decode_table(data: Dict[str, Any]):
         """解码牌桌"""
-        from ..core.table import Table
+        from ..core.table import Table, SidePot
         table = Table()
         table.community_cards = [GameStateDecoder.decode_card(c) for c in data.get('community_cards', [])]
         table.total_pot = data.get('total_pot', 0)
-        table.side_pots = data.get('side_pots', [])
+        
+        # 解码边池列表，将字典转换回SidePot对象
+        side_pots_data = data.get('side_pots', [])
+        table.side_pots = []
+        for pot_data in side_pots_data:
+            if isinstance(pot_data, dict):
+                pot = SidePot(
+                    amount=pot_data.get('amount', 0),
+                    max_contribution=pot_data.get('max_contribution', 0)
+                )
+                pot.eligible_players = set(pot_data.get('eligible_players', []))
+                table.side_pots.append(pot)
+        
         return table
     
     @staticmethod
@@ -250,5 +409,20 @@ class GameStateDecoder:
         game_state.min_raise = data.get('min_raise', 0)
         game_state.hand_number = data.get('hand_number', 0)
         game_state.table = GameStateDecoder.decode_table(data.get('table', {}))
-        game_state.active_players = [p for p in players if p.is_active]
+        
+        # 从保存的玩家名称列表恢复 active_players
+        active_player_names = data.get('active_player_names', [])
+        if active_player_names:
+            game_state.active_players = [p for p in players if p.name in active_player_names]
+        else:
+            # 兼容旧存档，使用 is_active 属性
+            game_state.active_players = [p for p in players if p.is_active]
+        
+        # 从保存的玩家名称列表恢复 winners
+        winner_names = data.get('winner_names', [])
+        if winner_names:
+            game_state.winners = [p for p in players if p.name in winner_names]
+        else:
+            game_state.winners = []
+        
         return game_state
