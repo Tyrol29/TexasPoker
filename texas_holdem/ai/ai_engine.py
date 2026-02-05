@@ -104,10 +104,16 @@ class AIEngine:
         is_preflop = (game_state == GameState.PRE_FLOP)
         style = getattr(player, 'ai_style', 'LAG')
         
+        # 根据可用行动过滤（提前获取）
+        available_names = [str(a).lower().replace('action.', '') for a in available_actions]
+        
         # 翻牌前起手牌选择
         if is_preflop:
             threshold = self._get_preflop_threshold(style)
             if hand_strength < threshold:
+                # 如果可以免费看牌(check)，优先选择check而不是fold
+                if amount_to_call <= 0 and 'check' in available_names:
+                    return Action.CHECK, 0
                 if player.is_big_blind and amount_to_call <= 10:
                     return (Action.CALL if amount_to_call > 0 else Action.CHECK, 0)
                 return Action.FOLD, 0
@@ -116,9 +122,6 @@ class AIEngine:
         action_weights = self._calculate_action_weights(
             hand_strength, style, config
         )
-        
-        # 根据可用行动过滤
-        available_names = [str(a).lower().replace('action.', '') for a in available_actions]
         
         # 选择行动
         action_name = self._weighted_choice(action_weights, available_names)
@@ -188,6 +191,7 @@ class AIEngine:
             else:
                 weights.update({'call': 0.65, 'fold': 0.15, 'bet': 0.15, 'raise': 0.05})
         else:  # 弱牌
+            # 如果可以免费看牌，优先check而不是fold
             if style in ['TAG', 'LAP']:
                 weights.update({'fold': 0.70, 'check': 0.20, 'call': 0.10})
             else:
@@ -199,6 +203,11 @@ class AIEngine:
         """加权随机选择"""
         # 过滤可用行动
         valid = {k: v for k, v in weights.items() if k in available and v > 0}
+        
+        # 优先处理逻辑：如果可以check，不要fold
+        if 'check' in available and 'fold' in valid:
+            # 移除fold，优先选择check或其他行动
+            del valid['fold']
         
         if not valid:
             return 'fold' if 'fold' in available else available[0] if available else 'fold'
@@ -267,37 +276,9 @@ class AIEngine:
     
     @staticmethod
     def _evaluate_preflop_strength(hole_cards) -> float:
-        """翻牌前手牌强度评估"""
-        if len(hole_cards) != 2:
-            return 0.5
-        
-        card1, card2 = hole_cards
-        val1, val2 = card1.value, card2.value
-        
-        # 对子
-        if val1 == val2:
-            pair_strength = val1 / 14.0
-            return 0.6 + pair_strength * 0.3
-        
-        # 同花
-        suited = card1.suit == card2.suit
-        
-        # 连牌
-        gap = abs(val1 - val2)
-        connected = gap <= 2
-        
-        # 高牌
-        high_card = max(val1, val2)
-        high_strength = high_card / 14.0
-        
-        base = 0.3
-        if suited:
-            base += 0.1
-        if connected:
-            base += 0.1
-        base += high_strength * 0.2
-        
-        return min(0.7, base)
+        """翻牌前手牌强度评估 - 使用预计算字典"""
+        from texas_holdem.preflop_strength import get_preflop_strength
+        return get_preflop_strength(hole_cards)
     
     @staticmethod
     def calculate_pot_odds(total_pot, amount_to_call) -> float:
