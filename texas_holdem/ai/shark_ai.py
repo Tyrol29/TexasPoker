@@ -661,19 +661,27 @@ class SharkAI:
             return max(big_blind * 2, bet_size)
             
         else:  # raise (有人已下注时)
-            # 计算加注额（基于当前下注额的增长）
-            min_raise = max(big_blind * 2, current_bet)
+            # 对于加注，amount应该是额外的加注金额（不是总下注额）
+            # 根据betting.py逻辑，min_raise = game_state.min_raise
+            # 这里我们基于底池计算目标总下注额，然后减去current_bet得到加注额
             
-            if total_strength > 0.80:  # 超强牌 - 大加注
-                raise_size = int(current_bet + total_pot * 0.75)
-            elif total_strength > 0.60:  # 强牌 - 标准加注
-                raise_size = int(current_bet + total_pot * 0.50)
-            elif draw_equity > 0.25:  # 听牌 - 半诈唬加注
-                raise_size = int(current_bet + total_pot * 0.40)
+            if total_strength > 0.80:  # 超强牌 - 加注到75%底池
+                target_total = int(total_pot * 0.75)
+            elif total_strength > 0.60:  # 强牌 - 加注到66%底池
+                target_total = int(total_pot * 0.66)
+            elif draw_equity > 0.25:  # 听牌 - 半诈唬加注到60%底池
+                target_total = int(total_pot * 0.60)
+            elif total_strength > 0.45:  # 中等牌 - 加注到50%底池
+                target_total = int(total_pot * 0.50)
             else:  # 弱牌 - 最小加注
-                raise_size = min_raise
+                target_total = current_bet + big_blind * 2
             
-            return max(min_raise, raise_size)
+            # 计算额外加注金额 = 目标总下注额 - 当前已下注额
+            raise_amount = max(0, target_total - current_bet)
+            
+            # 确保至少是大盲的2倍
+            min_raise = big_blind * 2
+            return max(min_raise, raise_amount)
     
     def _weighted_choice(self, weights: Dict[str, float]) -> str:
         """加权随机选择"""
