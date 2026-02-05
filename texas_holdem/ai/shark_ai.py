@@ -453,7 +453,7 @@ class SharkAI:
         return self._postflop_decision(
             player, available_actions, amount_to_call, current_bet,
             hand_strength, draw_equity, total_equity, direct_odds, 
-            implied_calc, spr_guidance, config, draws
+            implied_calc, spr_guidance, config, draws, total_pot
         )
     
     def _preflop_decision(self, player, available_actions, amount_to_call,
@@ -508,7 +508,7 @@ class SharkAI:
     
     def _postflop_decision(self, player, available_actions, amount_to_call,
                           current_bet, hand_strength, draw_equity, total_equity,
-                          direct_odds, implied_calc, spr_guidance, config, draws) -> Tuple[Any, int]:
+                          direct_odds, implied_calc, spr_guidance, config, draws, total_pot) -> Tuple[Any, int]:
         """翻牌后决策"""
         from texas_holdem.utils.constants import Action
         
@@ -561,7 +561,7 @@ class SharkAI:
         # 计算金额
         amount = self._calculate_amount(
             action, player, amount_to_call, current_bet, 
-            hand_strength, draw_equity, config
+            hand_strength, draw_equity, config, total_pot
         )
         
         return action, amount
@@ -613,34 +613,51 @@ class SharkAI:
         return weights
     
     def _calculate_amount(self, action, player, amount_to_call, current_bet,
-                         hand_strength, draw_equity, config) -> int:
-        """计算下注金额"""
+                         hand_strength, draw_equity, config, total_pot: int = 0) -> int:
+        """计算下注金额 - 基于底池百分比"""
         if action in ['fold', 'check', 'call']:
             return 0
         elif action == 'all_in':
             return player.chips
         
+        # 确保有底池信息，如果没有则使用默认值
+        if total_pot <= 0:
+            total_pot = 100  # 默认底池
+        
         big_blind = 20
         af = config['af_factor']
         total_strength = hand_strength + draw_equity * 0.5
         
-        if current_bet == 0:  # bet
-            if total_strength > 0.80:
-                return big_blind * int(3 + af * 0.5)
-            elif total_strength > 0.60:
-                return big_blind * int(2.5 + af * 0.3)
-            elif draw_equity > 0.25:
-                return big_blind * 3  # 听牌半诈唬
-            else:
-                return big_blind * 2
-        else:  # raise
+        # 基于底池百分比计算下注额（标准扑克下注尺度）
+        if current_bet == 0:  # bet (没人下注时)
+            if total_strength > 0.80:  # 坚果/超强牌 - 大注索取价值
+                bet_size = int(total_pot * 0.75)
+            elif total_strength > 0.60:  # 强牌 - 标准价值下注
+                bet_size = int(total_pot * 0.66)
+            elif draw_equity > 0.25:  # 强听牌 - 半诈唬，大注施压
+                bet_size = int(total_pot * 0.60)
+            elif total_strength > 0.45:  # 中等牌 - 小注控池
+                bet_size = int(total_pot * 0.33)
+            else:  # 弱牌/诈唬 - 小注或标准注
+                bet_size = int(total_pot * 0.25)
+            
+            # 确保至少是大盲的2倍
+            return max(big_blind * 2, bet_size)
+            
+        else:  # raise (有人已下注时)
+            # 计算加注额（基于当前下注额的增长）
             min_raise = max(big_blind * 2, current_bet)
-            if total_strength > 0.80:
-                return min_raise + big_blind * int(2 + af * 0.3)
-            elif total_strength > 0.60:
-                return min_raise + big_blind * int(1 + af * 0.2)
-            else:
-                return min_raise
+            
+            if total_strength > 0.80:  # 超强牌 - 大加注
+                raise_size = int(current_bet + total_pot * 0.75)
+            elif total_strength > 0.60:  # 强牌 - 标准加注
+                raise_size = int(current_bet + total_pot * 0.50)
+            elif draw_equity > 0.25:  # 听牌 - 半诈唬加注
+                raise_size = int(current_bet + total_pot * 0.40)
+            else:  # 弱牌 - 最小加注
+                raise_size = min_raise
+            
+            return max(min_raise, raise_size)
     
     def _weighted_choice(self, weights: Dict[str, float]) -> str:
         """加权随机选择"""
