@@ -397,7 +397,11 @@ class SharkAI:
         available_actions = betting_round.get_available_actions(player)
         amount_to_call = betting_round.get_amount_to_call(player)
         current_bet = game_state.current_bet if hasattr(game_state, 'current_bet') else 0
-        total_pot = game_state.pot if hasattr(game_state, 'pot') else 0
+        # 底池在 table.total_pot 中
+        if hasattr(game_state, 'table') and hasattr(game_state.table, 'total_pot'):
+            total_pot = game_state.table.total_pot
+        else:
+            total_pot = 0
         
         # 获取位置信息
         position = self.position_awareness.get_position(player)

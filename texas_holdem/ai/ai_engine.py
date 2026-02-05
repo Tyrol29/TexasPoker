@@ -81,10 +81,11 @@ class AIEngine:
             return self._shark_decision(player, betting_round, hand_strength,
                                         win_probability, pot_odds, ev)
         
-        # 获取底池大小
-        total_pot = getattr(game_state, 'pot', 0)
-        if total_pot == 0 and hasattr(game_state, 'table'):
-            total_pot = getattr(game_state.table, 'total_pot', 100)
+        # 获取底池大小（优先使用 table.total_pot）
+        if hasattr(game_state, 'table') and hasattr(game_state.table, 'total_pot'):
+            total_pot = game_state.table.total_pot
+        else:
+            total_pot = getattr(game_state, 'pot', 100)
         
         config = self.style_configs.get(style, self.style_configs['LAG'])
         
