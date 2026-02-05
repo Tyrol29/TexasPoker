@@ -81,11 +81,17 @@ class AIEngine:
             return self._shark_decision(player, betting_round, hand_strength,
                                         win_probability, pot_odds, ev)
         
+        # 获取底池大小
+        total_pot = getattr(game_state, 'pot', 0)
+        if total_pot == 0 and hasattr(game_state, 'table'):
+            total_pot = getattr(game_state.table, 'total_pot', 100)
+        
         config = self.style_configs.get(style, self.style_configs['LAG'])
         
         return self._choose_action_by_style(
             player, available_actions, amount_to_call, current_bet,
-            hand_strength, game_state.state, config, pot_odds, win_probability, ev
+            hand_strength, game_state.state, config, pot_odds, win_probability, ev,
+            total_pot
         )
     
     def _shark_decision(self, player, betting_round, hand_strength,
@@ -97,7 +103,7 @@ class AIEngine:
     
     def _choose_action_by_style(self, player, available_actions, amount_to_call,
                                 current_bet, hand_strength, game_state, config,
-                                pot_odds, win_probability, ev) -> Tuple[Any, int]:
+                                pot_odds, win_probability, ev, total_pot=100) -> Tuple[Any, int]:
         """根据风格选择行动"""
         from texas_holdem.utils.constants import Action
         
@@ -140,7 +146,7 @@ class AIEngine:
         # 计算金额
         amount = self._calculate_amount(
             action, player, amount_to_call, current_bet, 
-            hand_strength, config
+            hand_strength, config, total_pot
         )
         
         return action, amount
@@ -224,8 +230,8 @@ class AIEngine:
         return list(valid.keys())[-1]
     
     def _calculate_amount(self, action, player, amount_to_call, current_bet,
-                         hand_strength, config) -> int:
-        """计算下注金额"""
+                         hand_strength, config, total_pot=100) -> int:
+        """计算下注金额 - 基于底池百分比"""
         if action == 'fold' or action == 'check':
             return 0
         elif action == 'call':
@@ -233,24 +239,39 @@ class AIEngine:
         elif action == 'all_in':
             return player.chips
         
-        # bet 或 raise
+        # 确保有合理的底池值
+        if total_pot <= 0:
+            total_pot = 100
+        
         big_blind = 20  # 默认大盲
+        af = config.get('af_factor', 1.5)
         
         if current_bet == 0:  # bet
-            if hand_strength > 0.75:
-                return big_blind * 4
-            elif hand_strength > 0.55:
-                return big_blind * 3
-            else:
-                return big_blind * 2
+            # 基于底池百分比计算下注额
+            if hand_strength > 0.75:  # 超强牌 - 大注索取价值
+                bet_size = int(total_pot * 0.75)
+            elif hand_strength > 0.55:  # 强牌 - 标准价值下注
+                bet_size = int(total_pot * 0.66)
+            elif hand_strength > 0.40:  # 中等牌 - 小注控池
+                bet_size = int(total_pot * 0.50)
+            else:  # 弱牌/诈唬 - 小注
+                bet_size = int(total_pot * 0.33)
+            
+            # 确保至少是大盲的2倍
+            return max(big_blind * 2, bet_size)
+            
         else:  # raise
             min_raise = max(big_blind * 2, current_bet)
-            if hand_strength > 0.75:
-                return min_raise + big_blind * 2
-            elif hand_strength > 0.55:
-                return min_raise + big_blind
-            else:
-                return min_raise
+            
+            # 基于底池计算加注额
+            if hand_strength > 0.75:  # 超强牌 - 大加注
+                raise_size = int(current_bet + total_pot * 0.75)
+            elif hand_strength > 0.55:  # 强牌 - 标准加注
+                raise_size = int(current_bet + total_pot * 0.50)
+            else:  # 弱牌 - 最小加注
+                raise_size = min_raise
+            
+            return max(min_raise, raise_size)
     
     # 手牌评估方法
     @staticmethod
