@@ -127,6 +127,7 @@ class Player:
         amount = self.chips
         self.place_bet(amount)
         self.is_all_in = True
+        self.has_acted = True
         return amount
 
     def fold(self):

@@ -118,7 +118,16 @@ class GameStateManager:
         if len(self.active_players) <= 1:
             return True
 
-        # 检查是否所有玩家都已行动或全押
+        # 检查是否所有未弃牌的玩家都已全押
+        # 这种情况下直接完成下注轮，不需要再行动
+        all_all_in_or_folded = all(
+            player.is_all_in or not player.is_active 
+            for player in self.players
+        )
+        if all_all_in_or_folded:
+            return True
+
+        # 检查是否所有活动玩家都已行动或全押
         for player in self.active_players:
             if not player.has_acted and not player.is_all_in:
                 return False
@@ -140,6 +149,19 @@ class GameStateManager:
 
     def advance_stage(self):
         """推进到下一个游戏阶段"""
+        # 在进入下一阶段前，检查是否有未跟注all-in的玩家
+        # 这些玩家应该被强制弃牌
+        for player in self.players:
+            if player.is_active and not player.is_all_in:
+                amount_to_call = self.current_bet - player.bet_amount
+                if amount_to_call > 0:
+                    # 该玩家没有跟注all-in，强制弃牌
+                    player.is_active = False
+                    player.has_acted = True  # 标记为已行动
+        
+        # 更新活动玩家列表
+        self.update_active_players()
+        
         if self.state == GameState.PRE_FLOP:
             self.state = GameState.FLOP
         elif self.state == GameState.FLOP:

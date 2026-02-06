@@ -87,7 +87,7 @@ class PositionAwareness:
         'EP': 0.70,    # 早位：收紧
         'MP': 0.85,    # 中位：标准
         'CO': 1.10,    # Cutoff：抢盲位置，放宽
-        'BTN': 1.25,   # 按钮位：最大优势，大幅放宽
+        'BTN': 1.30,   # 按钮位：最大优势，大幅放宽
         'SB': 0.90,    # 小盲：位置劣势但可能有价格
         'BB': 1.00,    # 大盲：最后行动，有价格优势
     }
@@ -238,7 +238,7 @@ class SharkAI:
     
     # Sklansky前4组强牌门槛 (约前16%的手牌，牌力 >= 0.60)
     # 前4组包含：AA-88, AKs-A9s, AKo-AJo, KQs-KTs, KQo, QJs-Q9s, QJo, JTs, J9s, T9s
-    TIER3_THRESHOLD = 0.60
+    TIER3_THRESHOLD = 0.60  # 只玩Sklansky前3组强牌(约前16%的手牌)
     
     def __init__(self):
         # 初始使用紧凶(TAG)风格，只玩前3组强牌，学习后动态调整
@@ -271,6 +271,7 @@ class SharkAI:
         self.current_street = 'preflop'
         self.total_pot = 0
         self.effective_stack = 0
+        self.is_preflop_raiser = False  # 是否是翻牌前加注者（用于CBet决策）
     
     def initialize_opponents(self, players: List[Player]):
         """初始化对手追踪"""
@@ -290,7 +291,7 @@ class SharkAI:
                     'showdowns': 0,
                     'fold_tendency': 0.5,
                     'bluff_tendency': 0.5,
-                    'calling_tendency': 0.5,
+                    'calling_tendency': 0.3,
                 }
         self.adaptation_active = False
         self.hands_observed = 0
@@ -378,7 +379,7 @@ class SharkAI:
             adjustments.append("对手爱诈唬→收紧范围")
         
         # 对手跟注站 -> 减少诈唬，增加价值下注
-        if avg_call > 0.5:
+        if avg_call > 0.6:
             self.current_config['bluff_freq'] = max(0.1, self.base_config['bluff_freq'] - 0.1)
             self.current_config['bet_postflop'] = self.base_config['bet_postflop'] + 0.1
             self.current_config['af_factor'] = self.base_config['af_factor'] + 0.3
@@ -393,8 +394,17 @@ class SharkAI:
         """鲨鱼AI主决策方法"""
         from texas_holdem.utils.constants import Action
         
+        # 安全检查
+        if player is None or betting_round is None:
+            return Action.FOLD, 0
+        
         game_state = betting_round.game_state
+        if game_state is None:
+            return Action.FOLD, 0
+        
         available_actions = betting_round.get_available_actions(player)
+        if not available_actions:
+            return Action.FOLD, 0
         amount_to_call = betting_round.get_amount_to_call(player)
         current_bet = game_state.current_bet if hasattr(game_state, 'current_bet') else 0
         # 底池在 table.total_pot 中
@@ -448,33 +458,59 @@ class SharkAI:
         
         # 翻牌前决策
         if is_preflop:
-            return self._preflop_decision(
+            action, amount = self._preflop_decision(
                 player, available_actions, amount_to_call, 
                 hand_strength, position, spr_guidance, config
             )
+            # 记录是否是翻牌前加注者（用于后续CBet决策）
+            action_str_returned = str(action).lower()
+            if 'raise' in action_str_returned or action_str_returned == 'bet':
+                self.is_preflop_raiser = True
+            # 如果是call/check/fold，保持之前的值不变
+            return action, amount
         
         # 翻牌后决策
         return self._postflop_decision(
             player, available_actions, amount_to_call, current_bet,
             hand_strength, draw_equity, total_equity, direct_odds, 
-            implied_calc, spr_guidance, config, draws, total_pot
+            implied_calc, spr_guidance, config, draws, total_pot,
+            is_preflop_raiser=self.is_preflop_raiser
         )
     
     def _preflop_decision(self, player, available_actions, amount_to_call,
                          hand_strength, position, spr_guidance, config) -> Tuple[Any, int]:
-        """翻牌前决策 - TAG风格，只玩Sklansky前3组强牌"""
+        """翻牌前决策 - TAG风格，根据学习机制动态调整"""
         from texas_holdem.utils.constants import Action
+        import random
         
         available_names = [str(a).lower().replace('action.', '') for a in available_actions]
         
-        # TAG风格：玩Sklansky前4组强牌 (牌力 >= 0.60)，约16%的手牌
-        # 第1-2组(0.80+): AA-QQ, AKs, AKo - 大加注
-        # 第3组(0.70-0.80): JJ-TT, AQs-AJs, KQs, AQo - 标准加注/跟注
-        # 第4组(0.60-0.70): 99-88, ATs-A9s, KJs-KTs, QJs, JTs - 后位加注，早位弃牌
-        tier_threshold = self.TIER3_THRESHOLD
+        # 使用学习后的配置动态调整阈值
+        # 如果对手爱诈唬，收紧范围；如果对手易弃牌，放宽范围
+        base_threshold = self.TIER3_THRESHOLD
+        vpip_min, vpip_max = self.current_config['vpip_range']
+        base_vpip = (vpip_min + vpip_max) / 2 / 100  # 转换为0-1范围
         
-        # 位置调整（后位放宽）
-        position_multipliers = {'EP': 1.0, 'MP': 0.98, 'CO': 0.95, 'BTN': 0.93, 'SB': 0.98, 'BB': 0.95}
+        # 根据VPIP目标调整阈值 (0.15 -> 0.60, 0.20 -> 0.55)
+        threshold_adjustment = (0.20 - base_vpip) * 0.5  # 学习调整
+        tier_threshold = base_threshold + threshold_adjustment
+        
+        # 位置调整（后位放宽），根据fold_to_raise调整
+        fold_to_raise = self.current_config['fold_to_raise']
+        base_multipliers = {'EP': 1.0, 'MP': 0.98, 'CO': 0.95, 'BTN': 0.93, 'SB': 0.98, 'BB': 0.95}
+        
+        # 如果对手容易弃牌，后位可以更松；如果对手诈唬多，收紧范围
+        adjust_factor = 1.0
+        if self.adaptation_active:
+            avg_fold = sum(d['fold_tendency'] for d in self.opponent_data.values()) / len(self.opponent_data)
+            avg_bluff = sum(d['bluff_tendency'] for d in self.opponent_data.values()) / len(self.opponent_data)
+            
+            if avg_fold > 0.6:
+                adjust_factor = 0.95  # 对手易弃牌，放宽5%
+            elif avg_bluff > 0.4:
+                adjust_factor = 1.05  # 对手爱诈唬，收紧5%
+        
+        position_multipliers = {k: v * adjust_factor for k, v in base_multipliers.items()}
         adjusted_threshold = tier_threshold * position_multipliers.get(position, 1.0)
         
         # 牌力不够直接弃牌（除非大盲可以check）
@@ -483,36 +519,64 @@ class SharkAI:
                 return Action.CHECK, 0
             return Action.FOLD, 0
         
-        # 强牌分组决策
+        # 强牌分组决策 - 根据raise_preflop调整加注倾向
+        raise_preflop = self.current_config['raise_preflop']
+        should_raise = random.random() < raise_preflop
+        
         if hand_strength >= 0.80:  # 第1-2组超强牌 (AA-QQ, AKs, AKo)
             if 'raise' in available_names:
                 # TAG风格：大加注施压
                 raise_amount = max(40, amount_to_call + 30)
+                # 确保不超过筹码
+                if raise_amount >= player.chips:
+                    return Action.ALL_IN, player.chips
                 return Action.RAISE, raise_amount
             elif 'bet' in available_names:
-                return Action.BET, 40
+                bet_amount = min(40, player.chips)
+                return Action.BET, bet_amount
         
-        elif hand_strength >= 0.70:  # 第3组强牌 (JJ-TT, AQs等)
+        elif hand_strength >= 0.70:  # 第3组强牌(JJ-TT, AQs等)
             if position in ['EP', 'MP']:
-                # 早位：跟注看翻牌
-                if amount_to_call > 0 and 'call' in available_names:
+                # 根据配置决定跟注还是加注
+                if should_raise and 'raise' in available_names:
+                    raise_amount = min(40, player.chips)
+                    if raise_amount >= player.chips:
+                        return Action.ALL_IN, player.chips
+                    return Action.RAISE, raise_amount
+                elif amount_to_call > 0 and 'call' in available_names:
+                    # 确保能支付跟注
+                    if amount_to_call >= player.chips:
+                        return Action.ALL_IN, player.chips
                     return Action.CALL, 0
                 elif 'check' in available_names:
                     return Action.CHECK, 0
                 elif 'raise' in available_names:
-                    return Action.RAISE, 40
+                    raise_amount = min(40, player.chips)
+                    if raise_amount >= player.chips:
+                        return Action.ALL_IN, player.chips
+                    return Action.RAISE, raise_amount
             else:
                 # 后位：加注偷盲
                 if 'raise' in available_names:
-                    return Action.RAISE, 40
+                    raise_amount = min(40, player.chips)
+                    if raise_amount >= player.chips:
+                        return Action.ALL_IN, player.chips
+                    return Action.RAISE, raise_amount
                 elif 'call' in available_names:
+                    if amount_to_call >= player.chips:
+                        return Action.ALL_IN, player.chips
                     return Action.CALL, 0
         
         else:  # 第4组中等牌 (0.60-0.70: 99-88, ATs, KJs等)
             if position in ['CO', 'BTN', 'SB']:  # 只在后位玩
-                if 'raise' in available_names and amount_to_call <= 20:
-                    return Action.RAISE, 40  # 偷盲
+                if should_raise and 'raise' in available_names and amount_to_call <= 20:
+                    raise_amount = min(40, player.chips)
+                    if raise_amount >= player.chips:
+                        return Action.ALL_IN, player.chips
+                    return Action.RAISE, raise_amount  # 偷盲
                 elif 'call' in available_names and amount_to_call <= 20:
+                    if amount_to_call >= player.chips:
+                        return Action.ALL_IN, player.chips
                     return Action.CALL, 0
             # 早位弃牌这些牌
             if amount_to_call <= 0 and 'check' in available_names:
@@ -524,11 +588,20 @@ class SharkAI:
     
     def _postflop_decision(self, player, available_actions, amount_to_call,
                           current_bet, hand_strength, draw_equity, total_equity,
-                          direct_odds, implied_calc, spr_guidance, config, draws, total_pot) -> Tuple[Any, int]:
-        """翻牌后决策"""
+                          direct_odds, implied_calc, spr_guidance, config, draws, total_pot,
+                          is_preflop_raiser=False) -> Tuple[Any, int]:
+        """
+        翻牌后决策 - 自适应学习版
+        根据对手数据动态调整策略
+        """
         from texas_holdem.utils.constants import Action
         
         available_names = [str(a).lower().replace('action.', '') for a in available_actions]
+        
+        # 获取学习后的配置
+        bluff_freq = self.current_config['bluff_freq']
+        bet_postflop = self.current_config['bet_postflop']
+        af_factor = self.current_config['af_factor']
         
         # 超短筹码全押或弃牌模式
         if spr_guidance.get('push_fold', False):
@@ -537,50 +610,128 @@ class SharkAI:
             else:
                 return Action.FOLD, 0
         
+        # 计算综合胜率
+        total_strength = hand_strength * 0.7 + draw_equity * 0.3
+        
+        # ===== CBet策略（翻牌前加注者）- 根据学习调整 =====
+        if is_preflop_raiser and current_bet == 0:
+            # 计算CBet阈值 - 对手易弃牌则降低阈值（更频繁CBet）
+            cbet_threshold = 0.45
+            semi_bluff_threshold = 0.20
+            pure_bluff_freq = bluff_freq  # 使用学习后的诈唬频率
+            
+            if self.adaptation_active:
+                avg_fold = sum(d['fold_tendency'] for d in self.opponent_data.values()) / len(self.opponent_data)
+                if avg_fold > 0.6:
+                    # 对手易弃牌，降低CBet阈值，增加诈唬
+                    cbet_threshold = 0.35
+                    semi_bluff_threshold = 0.15
+                    pure_bluff_freq = min(0.5, bluff_freq + 0.1)
+                elif avg_fold < 0.3:
+                    # 对手不易弃牌，收紧CBet范围
+                    cbet_threshold = 0.50
+                    semi_bluff_threshold = 0.25
+                    pure_bluff_freq = max(0.05, bluff_freq - 0.05)
+            
+            if total_strength >= cbet_threshold:  # 有摊牌价值或听牌
+                if 'bet' in available_names:
+                    bet_size = max(40, int(total_pot * (0.66 + (af_factor - 2.5) * 0.05)))
+                    bet_size = min(bet_size, player.chips)
+                    if bet_size >= player.chips:
+                        return Action.ALL_IN, player.chips
+                    return Action.BET, bet_size
+            elif draw_equity >= semi_bluff_threshold:  # 有听牌，半诈唬
+                if 'bet' in available_names:
+                    bet_size = max(40, int(total_pot * 0.60))
+                    bet_size = min(bet_size, player.chips)
+                    if bet_size >= player.chips:
+                        return Action.ALL_IN, player.chips
+                    return Action.BET, bet_size
+            elif random.random() < pure_bluff_freq:  # 纯诈唬CBet - 使用学习频率
+                if 'bet' in available_names:
+                    bet_size = max(40, int(total_pot * 0.50))
+                    bet_size = min(bet_size, player.chips)
+                    if bet_size >= player.chips:
+                        return Action.ALL_IN, player.chips
+                    return Action.BET, bet_size
+            # 否则check
+            if 'check' in available_names:
+                return Action.CHECK, 0
+        
+        # ===== 非CBet情况下的翻牌后决策 =====
+        # 根据bet_postflop调整下注倾向
+        bet_threshold = 0.65 - (bet_postflop - 0.45) * 0.3  # bet_postflop越高，阈值越低
+        
         # 有听牌时的决策
         if draw_equity > 0.15:
-            # 检查赔率是否足够
             if implied_calc['should_call'] and 'call' in available_names:
+                if amount_to_call >= player.chips:
+                    return Action.ALL_IN, player.chips
                 return Action.CALL, 0
-            # 强听牌可以半诈唬加注
-            if draw_equity > 0.30 and 'raise' in available_names and hand_strength < 0.5:
-                return Action.RAISE, max(40, current_bet + 20)
+            # 强听牌可以半诈唬加注 - 根据af_factor调整
+            semi_bluff_raise_threshold = 0.30 - (af_factor - 2.5) * 0.02
+            if draw_equity > semi_bluff_raise_threshold and 'raise' in available_names and hand_strength < 0.5:
+                raise_size = max(40, current_bet + int(total_pot * 0.5))
+                if raise_size >= player.chips:
+                    return Action.ALL_IN, player.chips
+                return Action.RAISE, raise_size
         
-        # 基于手牌强度的权重计算
-        action_weights = self._calculate_postflop_weights(
-            hand_strength, draw_equity, config, spr_guidance
-        )
+        # 基于强度的决策 - 使用动态阈值
+        if total_strength >= bet_threshold:  # 强牌 - 激进价值下注
+            if current_bet == 0:
+                if 'bet' in available_names:
+                    bet_size = max(40, int(total_pot * (0.75 + (af_factor - 2.5) * 0.03)))
+                    if bet_size >= player.chips:
+                        return Action.ALL_IN, player.chips
+                    return Action.BET, bet_size
+            else:
+                if 'raise' in available_names:
+                    raise_size = max(40, current_bet + int(total_pot * 0.5))
+                    if raise_size >= player.chips:
+                        return Action.ALL_IN, player.chips
+                    return Action.RAISE, raise_size
+                elif 'call' in available_names:
+                    if amount_to_call >= player.chips:
+                        return Action.ALL_IN, player.chips
+                    return Action.CALL, 0
         
-        # 过滤可用行动
-        valid = {k: v for k, v in action_weights.items() if k in available_names and v > 0}
+        elif total_strength >= 0.45:  # 中等牌
+            if amount_to_call <= total_pot * 0.3:  # 赔率合适
+                if 'call' in available_names:
+                    if amount_to_call >= player.chips:
+                        return Action.ALL_IN, player.chips
+                    return Action.CALL, 0
+            if current_bet == 0 and 'check' in available_names:
+                return Action.CHECK, 0
         
-        # 如果可以check，避免fold
-        if 'check' in available_names and 'fold' in valid:
-            del valid['fold']
+        elif total_strength >= 0.30 or draw_equity > 0.15:  # 弱牌+听牌
+            # 根据对手跟注倾向调整
+            should_call = False
+            if self.adaptation_active:
+                avg_call = sum(d['calling_tendency'] for d in self.opponent_data.values()) / len(self.opponent_data)
+                if avg_call > 0.5 and amount_to_call > 0:
+                    # 对手跟注多，不诈唬，弃牌
+                    pass
+                elif implied_calc['should_call'] and 'call' in available_names:
+                    should_call = True
+            else:
+                if implied_calc['should_call'] and 'call' in available_names:
+                    should_call = True
+            
+            if should_call:
+                if amount_to_call >= player.chips:
+                    return Action.ALL_IN, player.chips
+                return Action.CALL, 0
+            
+            if 'check' in available_names:
+                return Action.CHECK, 0
         
-        if not valid:
+        # 默认行为
+        if amount_to_call > 0:
             return Action.FOLD, 0
-        
-        # 加权选择
-        action_name = self._weighted_choice(valid)
-        
-        action_map = {
-            'fold': Action.FOLD,
-            'check': Action.CHECK,
-            'call': Action.CALL,
-            'bet': Action.BET,
-            'raise': Action.RAISE,
-            'all_in': Action.ALL_IN
-        }
-        action = action_map.get(action_name, Action.FOLD)
-        
-        # 计算金额
-        amount = self._calculate_amount(
-            action, player, amount_to_call, current_bet, 
-            hand_strength, draw_equity, config, total_pot
-        )
-        
-        return action, amount
+        elif 'check' in available_names:
+            return Action.CHECK, 0
+        return Action.FOLD, 0
     
     def _calculate_postflop_weights(self, hand_strength: float, draw_equity: float,
                                     config: Dict, spr_guidance: Dict) -> Dict[str, float]:

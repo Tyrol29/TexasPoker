@@ -109,6 +109,18 @@ class GameEngine:
 
         # 重置玩家行动状态
         self.game_state.reset_player_actions()
+        
+        # 检查并处理上一轮的all-in情况：
+        # 如果当前下注额 > 0，且有玩家需要跟注，但他们不能过牌
+        current_bet = self.game_state.current_bet
+        if current_bet > 0:
+            for player in self.game_state.players:
+                if player.is_active and not player.is_all_in:
+                    amount_to_call = player.get_amount_to_call(current_bet)
+                    if amount_to_call > 0:
+                        # 该玩家需要跟注，强制他们做出决定（不能自动过牌）
+                        # 标记为未行动，确保他们必须跟注或弃牌
+                        player.has_acted = False
 
         # 下注轮次循环
         while not self.game_state.is_betting_round_complete():
